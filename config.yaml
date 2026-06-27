@@ -221,5 +221,8 @@ tgb:
   enabled: true
   max_per_user: 10
   users:
+    # 格式：id 为淘股吧用户数字 ID（URL /blog/<id> 中的数字），name 为昵称（仅供备注）
     - id: "11056656"
       name: 米开朗基瑞
+  # 可继续添加：- id: "用户ID"
+  #               name: 昵称

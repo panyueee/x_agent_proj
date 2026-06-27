@@ -9,6 +9,7 @@ import json
 import subprocess
 import datetime as dt
 import os
+import time
 
 from .fetcher import Tweet
 
@@ -59,7 +60,8 @@ class TgbClient:
         links = _run(["blog", user_id, str(max_results)])
         results = []
         for item in links:
-            # 2. 逐篇抓取详情
+            # 2. 逐篇抓取详情，间隔 2 秒避免被封 IP
+            time.sleep(2)
             try:
                 art = _run(["article", item["url"]])
             except Exception as e:

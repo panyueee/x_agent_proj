@@ -20,9 +20,15 @@ def scrape_blog(user_id, max_results):
         browser = p.chromium.launch(headless=True)
         page = browser.new_context(user_agent=UA, locale="zh-CN").new_page()
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        for _ in range(5):
+        # 滚动加载：检测链接数量稳定后才结束，最多滚动 8 次
+        prev_count = 0
+        for _ in range(8):
             page.keyboard.press("End")
-            page.wait_for_timeout(800)
+            page.wait_for_timeout(1000)
+            cur = len(page.query_selector_all("a[href*='/a/']"))
+            if cur == prev_count and cur > 0:
+                break
+            prev_count = cur
         page.wait_for_timeout(1500)
         for a in page.query_selector_all("a"):
             href = a.get_attribute("href") or ""
@@ -51,7 +57,11 @@ def scrape_article(url):
         lines = [l.strip() for l in text.split("\n") if l.strip()]
         title  = lines[0] if lines else ""
         meta   = lines[1] if len(lines) > 1 else ""
-        body   = "\n".join(lines[2:])[:600]
+        body   = "\n".join(lines[2:])[:800]
+        # 收集文章内图片的 alt 文字（可能含有用信息）
+        img_alts = page.eval_on_selector_all("img[alt]", "els => els.map(e => e.alt).filter(a => a.length > 2)")
+        if img_alts:
+            body += " " + " ".join(img_alts[:5])
         views    = re.search(r"浏览\s*([\d,]+)", meta)
         comments = re.search(r"评论\s*([\d,]+)", meta)
         date_m   = re.search(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})", meta)

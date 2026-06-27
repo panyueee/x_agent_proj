@@ -1,12 +1,13 @@
 """主程序：加载配置 → 并行抓取 → 分类 → 入库 → 生成摘要，可定时循环。
 
 用法：
-    python main.py [--source x|xhs|tgb|all] [config.yaml]
+    python main.py [--source x|xhs|tgb|finance|all] [config.yaml]
 
-    --source x    只抓 X (Twitter)
-    --source xhs  只抓小红书
-    --source tgb  只抓淘股吧
-    --source all  三路并行（默认）
+    --source x       只抓 X (Twitter)
+    --source xhs     只抓小红书
+    --source tgb     只抓淘股吧
+    --source finance 只抓金融行情（A股/美股/加密货币）
+    --source all     四路并行（默认）
 
 环境变量：
     THIRDPARTY_API_KEY  第三方 X API
@@ -30,6 +31,7 @@ from x_agent.storage import Store
 from x_agent.digest import build_digest
 from x_agent.xhs_fetcher import XhsClient
 from x_agent.tgb_fetcher import TgbClient
+from x_agent.finance_fetcher import FinanceClient
 
 
 def _expand_env(value):
@@ -120,26 +122,92 @@ def fetch_tgb(cfg, since):
     return collected
 
 
+def fetch_finance(cfg, _since):
+    """抓取金融行情数据（A股/美股/加密货币），返回 PriceBar 列表。"""
+    fin_cfg = cfg.get("finance", {})
+    if not fin_cfg.get("enabled"):
+        print("[finance] 未启用，跳过")
+        return []
+
+    client = FinanceClient()
+    bars = []
+
+    # A 股
+    a_list = fin_cfg.get("a_shares", [])
+    if a_list:
+        symbols = [item["code"] for item in a_list]
+        names   = [item.get("name", item["code"]) for item in a_list]
+        try:
+            result = client.fetch_a_shares(symbols, names)
+            print(f"[finance] A股实时行情 {len(result)} 条")
+            bars += result
+        except Exception as e:
+            print(f"[finance] A股抓取失败: {e}")
+
+    # 美股
+    us_list = fin_cfg.get("us_stocks", [])
+    if us_list:
+        symbols = [item["symbol"] for item in us_list]
+        try:
+            result = client.fetch_us_stocks(symbols)
+            print(f"[finance] 美股行情 {len(result)} 条")
+            bars += result
+        except Exception as e:
+            print(f"[finance] 美股抓取失败: {e}")
+
+    # 加密货币
+    crypto_list = fin_cfg.get("crypto", [])
+    if crypto_list:
+        symbols = [item["symbol"] for item in crypto_list]
+        try:
+            result = client.fetch_crypto(symbols)
+            print(f"[finance] 加密货币行情 {len(result)} 条")
+            bars += result
+        except Exception as e:
+            print(f"[finance] 加密货币抓取失败: {e}")
+
+    return bars
+
+
 def run_once(cfg, client, store, source, llm=None):
     since = dt.datetime.utcnow() - dt.timedelta(hours=cfg["fetch"]["lookback_hours"])
     collected = []
 
     tasks = {}
-    with ThreadPoolExecutor(max_workers=3) as exe:
+    with ThreadPoolExecutor(max_workers=4) as exe:
         if source in ("x", "all") and client:
             tasks["X"] = exe.submit(fetch_x, cfg, client, since)
         if source in ("xhs", "all"):
             tasks["小红书"] = exe.submit(fetch_xhs, cfg, since)
         if source in ("tgb", "all"):
             tasks["淘股吧"] = exe.submit(fetch_tgb, cfg, since)
+        if source in ("finance", "all"):
+            tasks["金融行情"] = exe.submit(fetch_finance, cfg, since)
 
+        finance_bars = []
         for name, future in tasks.items():
             try:
                 data = future.result()
-                print(f"[{name}] 抓取 {len(data)} 条")
-                collected += data
+                if name == "金融行情":
+                    # 行情数据走独立存储路径，不经过分类器
+                    finance_bars = data
+                    print(f"[{name}] 抓取 {len(data)} 条")
+                else:
+                    print(f"[{name}] 抓取 {len(data)} 条")
+                    collected += data
             except Exception as e:
                 print(f"[{name}] 抓取失败: {e}")
+
+    # 保存行情数据（price_bars 表，无需分类）
+    saved_bars = 0
+    for bar in finance_bars:
+        try:
+            store.save_price_bar(bar)
+            saved_bars += 1
+        except Exception as e:
+            print(f"[finance] 保存 {bar.symbol} 失败: {e}")
+    if saved_bars:
+        print(f"[finance] 已入库 {saved_bars} 条行情")
 
     new = kept = 0
     for tw in collected:
@@ -158,10 +226,10 @@ def run_once(cfg, client, store, source, llm=None):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="X + 小红书 + 淘股吧资讯抓取 Agent")
+    parser = argparse.ArgumentParser(description="X + 小红书 + 淘股吧 + 金融行情抓取 Agent")
     parser.add_argument(
-        "--source", choices=["x", "xhs", "tgb", "all"], default="all",
-        help="数据来源：x / xhs / tgb / all（默认，三路并行）"
+        "--source", choices=["x", "xhs", "tgb", "finance", "all"], default="all",
+        help="数据来源：x / xhs / tgb / finance / all（默认，四路并行）"
     )
     parser.add_argument("config", nargs="?", default="config.yaml")
     return parser.parse_args()

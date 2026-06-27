@@ -206,6 +206,27 @@ account_groups:
   - SCurveCapital
   - soulbiri1
   - pepemoonboy
+finance:
+  enabled: true
+  a_shares:
+    - code: "600519"
+      name: 贵州茅台
+    - code: "000858"
+      name: 五粮液
+    - code: "300750"
+      name: 宁德时代
+    - code: "601318"
+      name: 中国平安
+  us_stocks:
+    - symbol: AAPL
+    - symbol: NVDA
+    - symbol: TSLA
+    - symbol: MSFT
+  crypto:
+    - symbol: BTC/USDT
+    - symbol: ETH/USDT
+    - symbol: SOL/USDT
+  kline_days: 7
 xhs:
   enabled: true
   max_per_search: 10

@@ -5,6 +5,35 @@ import json
 import datetime as dt
 
 
+def _format_pct(pct: float) -> str:
+    """格式化涨跌幅，加上 + / - 符号和颜色前缀（纯文本用箭头区分）。"""
+    if pct >= 0:
+        return f"+{pct:.2f}%"
+    return f"{pct:.2f}%"
+
+
+def _market_section(store, market: str, title: str, limit: int = 30) -> list:
+    """生成单一市场的行情 Markdown 行列表。"""
+    try:
+        rows = store.recent_price_bars(market, limit=limit)
+    except Exception:
+        return []
+    if not rows:
+        return []
+
+    lines = [f"### {title}", ""]
+    lines.append("| 代码 | 名称 | 最新价 | 涨跌幅 | 更新时间 |")
+    lines.append("| ---- | ---- | ------: | ------: | -------- |")
+    for row in rows:
+        # row: (symbol, name, market, timestamp, open, high, low, close, volume, change_pct)
+        symbol, name, _market, timestamp, _o, _h, _l, close, _vol, change_pct = row
+        ts_short = timestamp[:16].replace("T", " ") if timestamp else "-"
+        pct_str = _format_pct(change_pct)
+        lines.append(f"| `{symbol}` | {name} | {close:.4g} | {pct_str} | {ts_short} |")
+    lines.append("")
+    return lines
+
+
 def build_digest(store, path: str) -> str:
     rows = store.recent_signals(["strategy", "web3", "both"], limit=80)
     strat = [r for r in rows if r[4] in ("strategy", "both")]
@@ -37,6 +66,13 @@ def build_digest(store, path: str) -> str:
         lines.append(f"  > {text.strip()[:240]}")
         lines.append(f"  - {url}")
     lines.append("")
+
+    # ---- 市场行情板块（从 price_bars 表读取）----
+    lines.append("## 💹 市场行情")
+    lines.append("")
+    lines += _market_section(store, "a_shares",  "A 股")
+    lines += _market_section(store, "us_stocks", "美 股")
+    lines += _market_section(store, "crypto",    "加密货币")
 
     out = "\n".join(lines)
     with open(path, "w", encoding="utf-8") as f:

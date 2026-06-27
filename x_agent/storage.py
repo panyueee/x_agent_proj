@@ -1,4 +1,4 @@
-"""SQLite 存储层：去重保存推文与信号。"""
+"""SQLite 存储层：去重保存推文、信号与金融行情数据。"""
 from __future__ import annotations
 
 import json
@@ -22,6 +22,22 @@ CREATE TABLE IF NOT EXISTS signals(
   FOREIGN KEY(tweet_id) REFERENCES tweets(id)
 );
 CREATE INDEX IF NOT EXISTS idx_signals_cat ON signals(category);
+CREATE TABLE IF NOT EXISTS price_bars(
+  symbol TEXT,
+  market TEXT,
+  timestamp TEXT,
+  open REAL,
+  high REAL,
+  low REAL,
+  close REAL,
+  volume REAL,
+  change_pct REAL,
+  name TEXT,
+  fetched_at TEXT,
+  PRIMARY KEY (symbol, timestamp)
+);
+CREATE INDEX IF NOT EXISTS idx_price_bars_market ON price_bars(market);
+CREATE INDEX IF NOT EXISTS idx_price_bars_symbol ON price_bars(symbol);
 """
 
 
@@ -76,7 +92,7 @@ class Store:
         )
         self.conn.commit()
 
-    def recent_signals(self, categories: list[str], limit: int = 80):
+    def recent_signals(self, categories, limit: int = 80):
         placeholders = ",".join("?" * len(categories))
         q = (
             "SELECT t.author, t.text, t.url, t.created_at, "
@@ -86,3 +102,49 @@ class Store:
             "ORDER BY t.created_at DESC LIMIT ?"
         )
         return self.conn.execute(q, (*categories, limit)).fetchall()
+
+    # ---- 金融行情存取 ----
+
+    def save_price_bar(self, bar) -> None:
+        """保存或覆盖一条行情记录（以 symbol+timestamp 为主键去重）。"""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO price_bars "
+            "(symbol, market, timestamp, open, high, low, close, volume, change_pct, name, fetched_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                bar.symbol, bar.market, bar.timestamp,
+                bar.open, bar.high, bar.low, bar.close,
+                bar.volume, bar.change_pct, bar.name,
+                dt.datetime.utcnow().isoformat(),
+            ),
+        )
+        self.conn.commit()
+
+    def recent_price_bars(self, market: str, limit: int = 50):
+        """返回指定市场最新的行情记录列表（每个品种取最新一条）。
+
+        返回元素：(symbol, name, market, timestamp, open, high, low, close, volume, change_pct)
+        """
+        q = (
+            "SELECT p.symbol, p.name, p.market, p.timestamp, "
+            "p.open, p.high, p.low, p.close, p.volume, p.change_pct "
+            "FROM price_bars p "
+            "INNER JOIN ("
+            "  SELECT symbol, MAX(timestamp) AS max_ts "
+            "  FROM price_bars WHERE market=? GROUP BY symbol"
+            ") latest ON p.symbol = latest.symbol AND p.timestamp = latest.max_ts "
+            "ORDER BY p.symbol LIMIT ?"
+        )
+        return self.conn.execute(q, (market, limit)).fetchall()
+
+    def latest_price(self, symbol: str):
+        """返回指定品种的最新一条行情，以字典形式返回，找不到时返回 None。"""
+        q = (
+            "SELECT symbol, name, market, timestamp, open, high, low, close, volume, change_pct "
+            "FROM price_bars WHERE symbol=? ORDER BY timestamp DESC LIMIT 1"
+        )
+        row = self.conn.execute(q, (symbol,)).fetchone()
+        if row is None:
+            return None
+        keys = ["symbol", "name", "market", "timestamp", "open", "high", "low", "close", "volume", "change_pct"]
+        return dict(zip(keys, row))

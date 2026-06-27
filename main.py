@@ -49,11 +49,22 @@ def load_config(path="config.yaml"):
 
 def fetch_x(cfg, client, since):
     collected = []
+    # min_followers_skip：预留参数，目前读取备用，暂不过滤（0 = 不过滤）
+    _min_followers_skip = cfg["fetch"].get("min_followers_skip", 0)
+
+    # 若 client 支持不活跃账号缓存（ThirdPartyXClient），取出引用
+    inactive = getattr(client, "inactive_accounts", None)
+
     groups = cfg.get("account_groups", {})
     if not groups and cfg.get("accounts"):
         groups = {"": cfg["accounts"]}
     for group_tag, acct_list in groups.items():
         for acct in acct_list:
+            # 若账号在本轮已标记为不活跃，直接跳过，节省 API 请求
+            clean_acct = acct.lstrip("@")
+            if inactive is not None and clean_acct in inactive:
+                print(f"[fetch_x] 跳过不活跃账号 @{clean_acct}")
+                continue
             try:
                 tweets = client.user_tweets(acct, cfg["fetch"]["max_per_account"], since)
                 for tw in tweets:

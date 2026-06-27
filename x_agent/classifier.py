@@ -53,6 +53,15 @@ TICKER_RE = re.compile(r"\$[A-Za-z]{2,6}\b")   # $BTC $ETH $SOL ...
 STRATEGY_THRESHOLD = 3
 WEB3_THRESHOLD = 3
 
+# 广告 / 垃圾账号黑名单关键词（全小写，命中任一即视为 spam，直接返回 none）
+SPAM_KEYWORDS = [
+    "join me at bybit",
+    "claim a 20 usdt",
+    "join our free signal",
+    "free signals group",
+    "click on the link below",
+]
+
 
 @dataclass
 class Signal:
@@ -74,6 +83,12 @@ def _score_zh(text: str, table: dict) -> int:
 
 
 def classify(tweet: Tweet) -> Signal:
+    # 广告黑名单过滤：命中任意 spam 词则直接返回 none，不进行后续打分
+    text_lower = tweet.text.lower()
+    for spam_kw in SPAM_KEYWORDS:
+        if spam_kw in text_lower:
+            return Signal(tweet.id, "none", 0)
+
     s_score = _score(tweet.text, STRATEGY_KEYWORDS) + _score_zh(tweet.text, STRATEGY_KEYWORDS_ZH)
     w_score = _score(tweet.text, WEB3_KEYWORDS) + _score_zh(tweet.text, WEB3_KEYWORDS_ZH)
     tickers = sorted(set(TICKER_RE.findall(tweet.text)))

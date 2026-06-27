@@ -153,6 +153,8 @@ class ThirdPartyXClient:
             "X-API-Key": api_key,
             "Accept": "application/json",
         })
+        # 本次运行内的不活跃账号缓存（每次进程重启自动清零）
+        self.inactive_accounts = set()  # type: ignore[type-arg]
 
     def _get(self, endpoint: str, params: dict) -> dict:
         """带节流与 429 退避的 GET 请求。"""
@@ -239,13 +241,22 @@ class ThirdPartyXClient:
         # twitterapi.io 在 data.tweets 或顶层 tweets 里返回列表
         raw_list = data.get("tweets") or data.get("data", {}).get("tweets") or []
         results = []
+        has_any = False   # API 是否返回了推文（不含转发）
         for t in raw_list:
             # 跳过转发（isRetweet）
             if t.get("isRetweet") or t.get("is_retweet"):
                 continue
+            has_any = True
             tw = self._tweet_from_raw(t, label=f"@{username}")
             if self._is_after(tw, since):
                 results.append(tw)
+
+        # 若 API 有返回推文，但全部早于 since，说明该账号近期不活跃，
+        # 加入本次运行的内存黑名单，后续调用可直接跳过。
+        if has_any and not results:
+            self.inactive_accounts.add(username)
+            print(f"[fetcher] @{username} 近期无新推文，已标记为不活跃，本轮跳过")
+
         return results[:max_results]
 
     def search(self, query: str, max_results: int, since: dt.datetime, label: str) -> list[Tweet]:

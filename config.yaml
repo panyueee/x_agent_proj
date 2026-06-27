@@ -226,6 +226,13 @@ finance:
     - symbol: BTC/USDT
     - symbol: ETH/USDT
     - symbol: SOL/USDT
+  indices:
+    - symbol: HSI
+      name: 恒生指数
+      secid: "100.HSI"
+    - symbol: NDX
+      name: 纳指100
+      secid: "107.NDX"
   kline_days: 7
 xhs:
   enabled: true

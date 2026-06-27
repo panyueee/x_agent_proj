@@ -216,7 +216,7 @@ account_groups:
   - pepemoonboy
 xhs:
   enabled: true
-  max_per_search: 10
+  max_per_search: 15
   max_per_account: 10
   searches:
     - query: BTC 交易策略
@@ -229,6 +229,22 @@ xhs:
       label: xhs_quant
     - query: A股 打板 龙头
       label: xhs_astock
+    - query: A股 涨停 板块
+      label: xhs_a_stock_limit
+    - query: 美股 财报 业绩
+      label: xhs_us_earnings
+    - query: ETF 定投 策略
+      label: xhs_etf
+    - query: 可转债 打新
+      label: xhs_bond
+    - query: 大盘 行情分析
+      label: xhs_market
+    - query: A股 龙头股 涨停
+      label: xhs_a_shares
+    - query: 美股 财报 业绩
+      label: xhs_us_stocks
+    - query: 量化策略 回测
+      label: xhs_quant
   accounts: []   # 填入要监控的小红书用户名
 tgb:
   enabled: true

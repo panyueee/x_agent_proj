@@ -48,8 +48,8 @@ def scrape_article(url):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_context(user_agent=UA, locale="zh-CN").new_page()
-        page.goto(url, wait_until="networkidle", timeout=30000)
-        page.wait_for_timeout(1500)
+        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_timeout(2000)
         container = page.query_selector(".article-content")
         if not container:
             return {}
@@ -57,7 +57,7 @@ def scrape_article(url):
         lines = [l.strip() for l in text.split("\n") if l.strip()]
         title  = lines[0] if lines else ""
         meta   = lines[1] if len(lines) > 1 else ""
-        body   = "\n".join(lines[2:])[:1000]
+        body   = "\n".join(lines[2:])
         # 收集文章内图片的 alt 文字（可能含有用信息）
         img_alts = page.eval_on_selector_all("img[alt]", "els => els.map(e => e.alt).filter(a => a.length > 2)")
         if img_alts:

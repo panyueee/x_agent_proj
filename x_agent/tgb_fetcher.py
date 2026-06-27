@@ -9,12 +9,13 @@ import json
 import subprocess
 import datetime as dt
 import os
+import sys
 import time
 
 from .fetcher import Tweet
 
 SCRAPER = os.path.join(os.path.dirname(__file__), "_tgb_scraper.py")
-PYTHON3 = "python3"   # 系统 python3，playwright 装在这里
+PYTHON3 = sys.executable   # 与主进程同一 Python/venv，确保 playwright 可用
 
 
 def _run(args):
@@ -23,7 +24,7 @@ def _run(args):
         capture_output=True, text=True, timeout=60
     )
     if r.returncode != 0:
-        raise RuntimeError(f"scraper 异常: {r.stderr[:200]}")
+        raise RuntimeError(f"scraper 异常: {r.stderr}")
     return json.loads(r.stdout)
 
 
@@ -70,9 +71,6 @@ class TgbClient:
             if not art:
                 continue
             tw = _to_tweet(art, user_id)
-            # 3. 时间过滤
-            if tw.created_at and tw.created_at < since.strftime("%Y-%m-%dT%H:%M:%SZ"):
-                continue
             results.append(tw)
         return results
 
@@ -114,8 +112,5 @@ class TgbClient:
                 source_label=stock_code,
                 group_tag="taoguba",
             )
-            # 3. 时间过滤
-            if tw.created_at and tw.created_at < since.strftime("%Y-%m-%dT%H:%M:%SZ"):
-                continue
             results.append(tw)
         return results

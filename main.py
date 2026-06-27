@@ -354,7 +354,12 @@ def main():
     cfg    = load_config(args.config)
     store  = Store(cfg["storage"]["db_path"])
     needs_x_client = args.source in ("x", "all", "pipeline")
-    client = build_client(cfg) if needs_x_client else None
+    client = None
+    if needs_x_client:
+        try:
+            client = build_client(cfg)
+        except Exception as e:
+            print(f"[warn] X 客户端初始化失败（{e}），跳过 X 抓取")
 
     llm = None
     if cfg["classify"].get("use_llm"):

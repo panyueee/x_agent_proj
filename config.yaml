@@ -216,6 +216,10 @@ xhs:
       label: xhs_web3
     - query: 合约交易 止损
       label: xhs_contract
+    - query: 量化交易 策略
+      label: xhs_quant
+    - query: A股 打板 龙头
+      label: xhs_astock
   accounts: []   # 填入要监控的小红书用户名
 tgb:
   enabled: true

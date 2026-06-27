@@ -64,14 +64,32 @@ def _ocr_images(image_list: list) -> str:
 
 
 def _card_to_tweet(note_id: str, card: dict, label: str) -> Tweet:
-    user     = card.get("user") or {}
-    desc     = card.get("desc") or ""
-    title    = card.get("title") or ""
-    imgs     = card.get("image_list") or []
-    ocr_text = _ocr_images(imgs) if imgs else ""
-    text     = " ".join(filter(None, [title, desc, ocr_text]))
+    user  = card.get("user") or {}
+    desc  = card.get("desc") or ""
+    title = card.get("title") or ""
+    imgs  = card.get("image_list") or []
 
-    created_at = _parse_time(card.get("last_update_time") or card.get("time") or 0)
+    # 视频笔记的图片通常只是封面缩略图，OCR 意义不大，跳过以节省时间
+    if card.get("type") == "video":
+        ocr_text = ""
+    else:
+        ocr_text = _ocr_images(imgs) if imgs else ""
+
+    text = " ".join(filter(None, [title, desc, ocr_text]))
+
+    # last_update_time 为毫秒时间戳；部分笔记用 time 字段；容错处理 0 值
+    ts_ms = card.get("last_update_time") or card.get("time") or 0
+    try:
+        ts_ms = int(ts_ms)
+    except (TypeError, ValueError):
+        ts_ms = 0
+    if ts_ms > 1_000_000_000_000:          # 毫秒级
+        created_at = dt.datetime.utcfromtimestamp(ts_ms / 1000).strftime("%Y-%m-%dT%H:%M:%SZ")
+    elif ts_ms > 1_000_000_000:            # 秒级（容错）
+        created_at = dt.datetime.utcfromtimestamp(ts_ms).strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        created_at = ""
+
     metrics = {
         "liked_count":     card.get("interact_info", {}).get("liked_count", 0),
         "collected_count": card.get("interact_info", {}).get("collected_count", 0),
@@ -91,9 +109,14 @@ def _card_to_tweet(note_id: str, card: dict, label: str) -> Tweet:
 
 
 def _read_note(note_id: str) -> dict:
-    data  = _run_xhs("read", note_id)
-    items = data.get("data", {}).get("items") or []
-    return items[0].get("note_card", {}) if items else {}
+    """读取单条笔记详情。若 CLI 返回非 YAML 内容（如登录失效提示），返回空 dict 而不崩溃。"""
+    try:
+        data  = _run_xhs("read", note_id)
+        items = data.get("data", {}).get("items") or []
+        return items[0].get("note_card", {}) if items else {}
+    except Exception as e:
+        print(f"[xhs] _read_note({note_id}) 异常: {e}")
+        return {}
 
 
 class XhsClient:

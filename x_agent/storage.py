@@ -110,6 +110,21 @@ CREATE TABLE IF NOT EXISTS pipeline_events(
 );
 CREATE INDEX IF NOT EXISTS idx_pipeline_status ON pipeline_events(status);
 CREATE INDEX IF NOT EXISTS idx_pipeline_target ON pipeline_events(target_agent, status);
+
+CREATE TABLE IF NOT EXISTS industry_insights(
+  id            TEXT PRIMARY KEY,   -- hash(tweet_id)
+  tweet_id      TEXT,
+  source        TEXT,               -- twitter / xiaohongshu / taoguba
+  chain         TEXT,
+  companies     TEXT,               -- JSON: [{code, name, role}]
+  relationships TEXT,               -- JSON: [{from, to, type, detail}]
+  events        TEXT,               -- JSON: [{title, content}]
+  raw_text      TEXT,               -- 原始帖子摘要
+  confidence    REAL DEFAULT 0.0,
+  extracted_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_insights_chain  ON industry_insights(chain);
+CREATE INDEX IF NOT EXISTS idx_insights_source ON industry_insights(source);
 """
 
 
@@ -380,6 +395,71 @@ class Store:
             (status, dt.datetime.utcnow().isoformat(), event_id),
         )
         self.conn.commit()
+
+    # ---- 产业链学习洞察 ----
+
+    def insight_exists(self, tweet_id: str) -> bool:
+        """判断某条推文是否已经被提取过洞察。"""
+        return self.conn.execute(
+            "SELECT 1 FROM industry_insights WHERE tweet_id=?", (tweet_id,)
+        ).fetchone() is not None
+
+    def save_insight(self, tweet_id: str, source: str, chain: str,
+                     companies: list, relationships: list, events: list,
+                     raw_text: str, confidence: float) -> None:
+        import hashlib
+        iid = hashlib.md5(tweet_id.encode()).hexdigest()
+        self.conn.execute(
+            "INSERT OR IGNORE INTO industry_insights "
+            "(id, tweet_id, source, chain, companies, relationships, events, "
+            "raw_text, confidence, extracted_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (iid, tweet_id, source, chain,
+             json.dumps(companies, ensure_ascii=False),
+             json.dumps(relationships, ensure_ascii=False),
+             json.dumps(events, ensure_ascii=False),
+             raw_text, confidence,
+             dt.datetime.utcnow().isoformat()),
+        )
+        self.conn.commit()
+
+    def unprocessed_signals(self, min_score: int = 4,
+                             sources: tuple = ("twitter", "xiaohongshu", "taoguba"),
+                             limit: int = 50) -> list:
+        """返回尚未被学习处理的高分信号帖（finance/strategy 类）。"""
+        placeholders = ",".join("?" * len(sources))
+        rows = self.conn.execute(
+            f"SELECT t.id, t.text, t.source, t.author, t.created_at "
+            f"FROM signals s JOIN tweets t ON t.id=s.tweet_id "
+            f"WHERE s.score >= ? AND t.source IN ({placeholders}) "
+            f"AND s.category IN ('strategy','finance','both','strategy+finance') "
+            f"AND t.id NOT IN (SELECT tweet_id FROM industry_insights) "
+            f"ORDER BY s.score DESC, t.created_at DESC LIMIT ?",
+            (min_score, *sources, limit),
+        ).fetchall()
+        return [{"id": r[0], "text": r[1], "source": r[2],
+                 "author": r[3], "created_at": r[4]} for r in rows]
+
+    def recent_insights(self, chain: str = "", limit: int = 20) -> list:
+        """返回最近的产业链洞察，可按 chain 过滤。"""
+        if chain:
+            rows = self.conn.execute(
+                "SELECT chain, companies, relationships, events, source, confidence, extracted_at "
+                "FROM industry_insights WHERE chain=? ORDER BY extracted_at DESC LIMIT ?",
+                (chain, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT chain, companies, relationships, events, source, confidence, extracted_at "
+                "FROM industry_insights ORDER BY extracted_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [
+            {"chain": r[0], "companies": json.loads(r[1] or "[]"),
+             "relationships": json.loads(r[2] or "[]"),
+             "events": json.loads(r[3] or "[]"),
+             "source": r[4], "confidence": r[5], "extracted_at": r[6]}
+            for r in rows
+        ]
 
     def recent_supplier_updates(self, customer_name: str, limit: int = 20) -> list:
         """返回某核心公司的供应商动态。"""

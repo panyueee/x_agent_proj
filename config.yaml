@@ -381,6 +381,11 @@ pipeline:
   enabled: true
   digest_path: ./pipeline_digest.md
   lookback_hours: 48        # 扫描最近多少小时的 X 推文找触发词
+  learning:
+    enabled: true
+    min_score: 4            # 帖子最低得分才送 LLM 提取
+    max_posts_per_run: 30   # 每轮最多处理多少条（控制 LLM 消耗）
+    use_llm: true           # false 则只用正则轻量提取，不消耗 API
   # 自定义触发规则（覆盖 pipeline.py 内置规则）
   # 格式：chain 必须与 industry.chains[].name 一致
   extra_triggers:

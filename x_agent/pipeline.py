@@ -15,6 +15,7 @@ from typing import List
 from .storage import Store
 from .industry_fetcher import IndustryClient, IndustryNode, ChainEvent
 from .research_fetcher import ResearchClient
+from .industry_learner import run_learning_step, learning_summary
 
 
 # ── 触发规则：关键词 → 产业链名称（对应 config.yaml industry.chains[].name）──
@@ -321,6 +322,29 @@ def build_pipeline_digest(store: Store, output_path: str = "./pipeline_digest.md
             lines.append("---")
             lines.append("")
 
+    # 学习洞察摘要
+    lines.append("## 学习洞察")
+    lines.append("")
+    insights = store.recent_insights(limit=10)
+    if insights:
+        for ins in insights:
+            if not ins["chain"] or ins["confidence"] < 0.5:
+                continue
+            comps = "、".join(c.get("name", "") for c in ins["companies"][:3] if c.get("name"))
+            rels  = "；".join(
+                f"{r.get('from','?')}→{r.get('to','?')}({r.get('type','')})"
+                for r in ins["relationships"][:2]
+            )
+            lines.append(f"- **[{ins['chain']}]** `{ins['source']}`  "
+                         f"置信:{ins['confidence']:.2f}")
+            if comps:
+                lines.append(f"  公司: {comps}")
+            if rels:
+                lines.append(f"  关系: {rels}")
+    else:
+        lines.append("_暂无学习洞察（需运行 --source pipeline 或 use_llm: true）_")
+    lines.append("")
+
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
     print(f"[pipeline] 联动摘要 → {output_path}")
@@ -330,16 +354,25 @@ def build_pipeline_digest(store: Store, output_path: str = "./pipeline_digest.md
 # 入口：完整跑一遍三步联动
 # ─────────────────────────────────────────────────────────────────
 
-def run_pipeline(store: Store, cfg: dict) -> None:
-    """完整联动流程：扫描 X → 产业链深挖 → 研报跟进 → 生成摘要。"""
+def run_pipeline(store: Store, cfg: dict, llm_client=None) -> None:
+    """完整联动流程：学习 → 扫描 X → 产业链深挖 → 研报跟进 → 生成摘要。"""
     print("\n═══ 联动管道启动 ═══")
 
+    # Step 0：从已有信号帖学习产业链洞察（有 LLM 则用，无则降级到轻量模式）
+    learned = run_learning_step(store, cfg, llm_client=llm_client)
+    print(f"[pipeline] Step 0 完成：学习 {learned} 条帖子")
+    if learned:
+        print(f"[pipeline] {learning_summary(store)}")
+
+    # Step 1：扫描 X 推文检测触发词
     triggered = scan_x_for_triggers(store, cfg)
     print(f"[pipeline] Step 1 完成：检测到 {triggered} 条新触发")
 
+    # Step 2：产业链深挖
     research_jobs = run_industry_step(store, cfg)
     print(f"[pipeline] Step 2 完成：产生 {research_jobs} 个研报任务")
 
+    # Step 3：研报跟进
     reports_saved = run_research_step(store, cfg)
     print(f"[pipeline] Step 3 完成：保存 {reports_saved} 篇研报")
 

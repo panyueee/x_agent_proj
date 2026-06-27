@@ -202,7 +202,7 @@ def run_once(cfg, client, store, source, llm=None):
         if client:
             tweets = fetch_x(cfg, client, since)
             _save_tweets(tweets, store, cfg, llm)
-        run_pipeline(store, cfg)
+        run_pipeline(store, cfg, llm_client=llm)
         return
 
     # ── 独立模块模式 ──

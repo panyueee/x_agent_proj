@@ -73,6 +73,7 @@ def build_digest(store, path: str) -> str:
     lines += _market_section(store, "a_shares",  "A 股")
     lines += _market_section(store, "us_stocks", "美 股")
     lines += _market_section(store, "crypto",    "加密货币")
+    lines += _market_section(store, "index",     "全球指数")
 
     out = "\n".join(lines)
     with open(path, "w", encoding="utf-8") as f:

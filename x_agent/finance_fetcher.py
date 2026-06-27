@@ -301,16 +301,105 @@ class FinanceClient:
             print(f"[finance] 加密K线 {symbol} 失败: {e}")
             return []
 
+    # ---- 全球指数实时行情（东方财富）----
+
+    def fetch_indices(self, indices_cfg):
+        # type: (List[dict]) -> List[PriceBar]
+        """
+        拉取全球指数行情。
+        indices_cfg: [{"symbol": "HSI", "name": "恒生指数", "secid": "100.HSI"}, ...]
+        secid 在 config.yaml 中配置，格式为 "<市场代码>.<代码>"。
+        东方财富 f43 字段对指数同样以整数×1000 存储点位。
+        """
+        bars = []
+        ts = _now_iso()
+        for item in indices_cfg:
+            sym   = item["symbol"]
+            name  = item.get("name", sym)
+            secid = item.get("secid")
+            if not secid:
+                print(f"[finance] 指数 {sym} 缺少 secid，跳过")
+                continue
+            try:
+                url = (
+                    "https://push2.eastmoney.com/api/qt/stock/get"
+                    f"?secid={secid}"
+                    "&fields=f43,f44,f45,f46,f57,f58,f170,f47"
+                )
+                r = requests.get(url, headers=_EMC_HEADERS, timeout=8)
+                d = r.json().get("data") or {}
+                if not d or d.get("f43") in (None, "-", 0):
+                    print(f"[finance] 指数 {sym} ({secid}) 无数据")
+                    continue
+                close      = _safe_float(d["f43"]) / 1000
+                high       = _safe_float(d["f44"]) / 1000
+                low        = _safe_float(d["f45"]) / 1000
+                open_price = _safe_float(d["f46"]) / 1000
+                change_pct = _safe_float(d.get("f170", 0)) / 100
+                volume     = _safe_float(d.get("f47", 0))
+                bars.append(PriceBar(
+                    symbol=sym, market="index", name=name,
+                    timestamp=ts,
+                    open=open_price, high=high, low=low, close=close,
+                    volume=volume, change_pct=change_pct,
+                ))
+            except Exception as e:
+                print(f"[finance] 指数 {sym} 行情失败: {e}")
+        return bars
+
+    # ---- 指数日K线（东方财富）----
+
+    def _kline_indices(self, symbol, secid, days):
+        # type: (str, str, int) -> List[PriceBar]
+        try:
+            url = (
+                "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+                f"?secid={secid}"
+                "&fields1=f1,f2,f3,f4,f5,f6"
+                "&fields2=f51,f52,f53,f54,f55,f56"
+                f"&klt=101&fqt=1&end=20500101&lmt={days}"
+            )
+            r = requests.get(url, headers=_EMC_HEADERS, timeout=10)
+            klines = (r.json().get("data") or {}).get("klines") or []
+            if not klines:
+                return []
+            bars = []
+            prev_close = None
+            for line in klines:
+                parts = line.split(",")
+                if len(parts) < 6:
+                    continue
+                date_str, o, c, h, l, vol = parts[:6]
+                close = _safe_float(c)
+                change_pct = ((close - prev_close) / prev_close * 100) if prev_close else 0.0
+                prev_close = close
+                bars.append(PriceBar(
+                    symbol=symbol, market="index", name=symbol,
+                    timestamp=date_str + "T00:00:00Z",
+                    open=_safe_float(o), high=_safe_float(h),
+                    low=_safe_float(l), close=close,
+                    volume=_safe_float(vol), change_pct=change_pct,
+                ))
+            return bars
+        except Exception as e:
+            print(f"[finance] 指数K线 {symbol} 失败: {e}")
+            return []
+
     # ---- K线统一入口 ----
 
-    def fetch_kline(self, symbol, market, days=7):
-        # type: (str, str, int) -> List[PriceBar]
-        """拉取日K线，按 market 路由到对应数据源。"""
+    def fetch_kline(self, symbol, market, days=7, secid=None):
+        # type: (str, str, int, Optional[str]) -> List[PriceBar]
+        """拉取日K线，按 market 路由到对应数据源。index 市场需传 secid。"""
         if market == "a_shares":
             return self._kline_a_shares(symbol, days)
         if market == "us_stocks":
             return self._kline_us_stocks(symbol, days)
         if market == "crypto":
             return self._kline_crypto(symbol, days)
+        if market == "index":
+            if not secid:
+                print(f"[finance] 指数K线 {symbol} 需要 secid")
+                return []
+            return self._kline_indices(symbol, secid, days)
         print(f"[finance] 未知 market: {market}")
         return []

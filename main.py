@@ -176,6 +176,16 @@ def fetch_finance(cfg, _since):
         except Exception as e:
             print(f"[finance] 加密货币抓取失败: {e}")
 
+    # 全球指数（HSI、NDX 等）
+    indices_list = fin_cfg.get("indices", [])
+    if indices_list:
+        try:
+            result = client.fetch_indices(indices_list)
+            print(f"[finance] 指数行情 {len(result)} 条")
+            bars += result
+        except Exception as e:
+            print(f"[finance] 指数抓取失败: {e}")
+
     return bars
 
 

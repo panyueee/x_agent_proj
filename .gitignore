@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.db
+digest.md
+.env
+CLAUDE.local.md

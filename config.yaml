@@ -17,7 +17,7 @@ searches:
 fetch:
   max_per_account: 5
   max_per_search: 30
-  lookback_hours: 72
+  lookback_hours: 24
   poll_interval_minutes: 60
   min_followers_skip: 0   # 粉丝数低于此值的账号将被跳过（0 = 不过滤，预留参数）
 classify:

@@ -7,12 +7,13 @@
 访问：http://localhost:8765
 """
 import os
+import re
 import subprocess
 import threading
 import time
 import json
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -30,23 +31,29 @@ LOGS_DIR.mkdir(exist_ok=True)
 CLAUDE_BIN = "/Users/pany19/.nvm/versions/node/v22.22.2/bin/claude"
 
 AGENTS = [
-    {"id": "x",       "name": "X (Twitter)",  "branch": "feature/x",
+    {"id": "x",        "name": "X (Twitter)",  "branch": "feature/x",
      "worktree": ".claude/worktrees/feature-x"},
-    {"id": "xhs",     "name": "小红书",         "branch": "feature/xhs",
+    {"id": "xhs",      "name": "小红书",         "branch": "feature/xhs",
      "worktree": ".claude/worktrees/feature-xhs"},
-    {"id": "tgb",     "name": "淘股吧",         "branch": "feature/tgb",
+    {"id": "tgb",      "name": "淘股吧",         "branch": "feature/tgb",
      "worktree": ".claude/worktrees/feature-tgb"},
-    {"id": "finance", "name": "金融行情",        "branch": "feature/finance",
+    {"id": "finance",  "name": "金融行情",        "branch": "feature/finance",
      "worktree": ".claude/worktrees/feature-finance"},
+    {"id": "industry", "name": "产业链分析",      "branch": "feature/industry",
+     "worktree": ".claude/worktrees/feature-industry"},
+    {"id": "research", "name": "研报跟进",        "branch": "feature/research",
+     "worktree": ".claude/worktrees/feature-research"},
 ]
 
 # ── 运行状态（内存，进程重启后重置）──────────────────────────────────────────
 
 _run = {
-    "status": "idle",    # idle | running | done | error
-    "pid":    None,
-    "log":    [],        # list of str lines
-    "proc":   None,      # subprocess.Popen
+    "status":     "idle",   # idle | running | done | error
+    "pid":        None,
+    "log":        [],       # list of str lines
+    "proc":       None,     # subprocess.Popen
+    "session_id": None,     # 最近一次成功完成的 claude 会话 ID
+    "master_fd":  None,     # PTY master fd
 }
 _log_lock = threading.Lock()
 
@@ -54,7 +61,6 @@ _log_lock = threading.Lock()
 def _append_log(line: str):
     with _log_lock:
         _run["log"].append(line)
-        # 只保留最近 2000 行
         if len(_run["log"]) > 2000:
             _run["log"] = _run["log"][-2000:]
 
@@ -110,16 +116,154 @@ def _build_prompt() -> str:
 
 # ── Claude 进程管理 ───────────────────────────────────────────────────────────
 
-def _stream_proc(proc):
-    """后台线程：把进程 stdout 逐行写入 _run['log']。"""
-    for raw in iter(proc.stdout.readline, ""):
-        line = raw.rstrip("\n")
-        if line:
+_TOOL_ICONS = {
+    "Bash": "💻", "Read": "📖", "Edit": "✏️", "Write": "📝",
+    "Glob": "🔍", "Grep": "🔎", "WebFetch": "🌐", "WebSearch": "🌐",
+    "Task": "🤖", "TodoWrite": "📋",
+}
+
+
+def _format_event(ev: dict) -> Optional[str]:
+    """将 stream-json 事件转换为可读日志行，None 表示跳过。"""
+    t = ev.get("type", "")
+
+    if t == "system" and ev.get("subtype") == "init":
+        sid = ev.get("session_id", "")
+        _run["session_id"] = sid
+        model = ev.get("model", "")
+        return f"[会话 {sid[:8]}] 已连接 ({model})"
+
+    if t == "system" and ev.get("subtype") == "status":
+        status = ev.get("status", "")
+        if status == "requesting":
+            return "正在请求 Claude API..."
+        return None
+
+    if t == "stream_event":
+        event = ev.get("event", {})
+        etype = event.get("type", "")
+        if etype == "content_block_start":
+            cb = event.get("content_block", {})
+            if cb.get("type") == "tool_use":
+                name = cb.get("name", "?")
+                icon = _TOOL_ICONS.get(name, "🔧")
+                return f"{icon} {name}..."
+        return None
+
+    if t == "assistant":
+        msg = ev.get("message", {})
+        for block in msg.get("content", []):
+            if block.get("type") == "text":
+                text = block.get("text", "").strip()
+                if text:
+                    lines = text.split("\n")
+                    return "\n".join(f"  {l}" for l in lines if l.strip())
+            if block.get("type") == "tool_use":
+                name = block.get("name", "?")
+                inp = block.get("input", {})
+                icon = _TOOL_ICONS.get(name, "🔧")
+                detail = ""
+                if name == "Bash":
+                    detail = inp.get("command", "")[:80]
+                elif name in ("Read", "Edit", "Write", "Glob", "Grep"):
+                    detail = inp.get("file_path") or inp.get("pattern") or ""
+                    detail = str(detail)[:60]
+                return f"{icon} {name}: {detail}" if detail else f"{icon} {name}"
+        return None
+
+    if t == "tool_result":
+        content = ev.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(b.get("text", "") for b in content if b.get("type") == "text")
+        if isinstance(content, str) and content.strip():
+            lines = content.strip().split("\n")
+            preview = lines[0][:100] + ("…" if len(lines) > 1 or len(lines[0]) > 100 else "")
+            return f"  └ {preview}"
+        return None
+
+    if t == "result":
+        if ev.get("is_error"):
+            return "❌ 执行出错"
+        cost = ev.get("total_cost_usd", 0)
+        ms = ev.get("duration_ms", 0)
+        result_text = ev.get("result", "")
+        lines = [f"✅ 完成 ({ms/1000:.1f}s, ${cost:.3f})"]
+        if result_text:
+            for l in result_text.strip().split("\n")[:5]:
+                lines.append(f"  {l}")
+        return "\n".join(lines)
+
+    return None
+
+
+def _stream_json(proc):
+    """后台线程：读取 claude --output-format stream-json 输出并写入日志。"""
+    text_buf = ""
+    for raw_line in proc.stdout:
+        line = raw_line.rstrip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
             _append_log(line)
+            continue
+
+        # 累积文本块（streaming deltas）
+        if ev.get("type") == "stream_event":
+            event = ev.get("event", {})
+            if event.get("type") == "content_block_delta":
+                delta = event.get("delta", {})
+                if delta.get("type") == "text_delta":
+                    text_buf += delta.get("text", "")
+                    # 每遇到换行就输出
+                    while "\n" in text_buf:
+                        chunk, text_buf = text_buf.split("\n", 1)
+                        if chunk.strip():
+                            _append_log(f"  {chunk}")
+                    continue
+            elif event.get("type") == "content_block_stop" and text_buf.strip():
+                _append_log(f"  {text_buf.strip()}")
+                text_buf = ""
+
+        msg = _format_event(ev)
+        if msg:
+            _append_log(msg)
+
+    # 剩余文本缓冲
+    if text_buf.strip():
+        _append_log(f"  {text_buf.strip()}")
+
     proc.wait()
-    _run["status"] = "done" if proc.returncode == 0 else "error"
-    _run["proc"]   = None
-    _append_log(f"\n── 进程结束 (exit {proc.returncode}) ──")
+    code = proc.returncode
+    if code == 0:
+        _run["status"] = "done"
+    elif code in (-15, 143):
+        _run["status"] = "idle"
+    else:
+        _run["status"] = "error"
+    _run["proc"] = None
+    _run["pid"]  = None
+    _append_log(f"\n── 进程结束 (exit {code}) ──")
+
+
+def _run_claude(cmd, header):
+    """启动 claude（stream-json 模式），返回 (ok, pid_or_errmsg)。"""
+    full_cmd = cmd + ["--output-format", "stream-json", "--verbose"]
+    try:
+        proc = subprocess.Popen(
+            full_cmd, cwd=str(ROOT),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+    except Exception as e:
+        return False, str(e)
+
+    _run["proc"] = proc
+    _run["pid"]  = proc.pid
+    _append_log(header)
+    threading.Thread(target=_stream_json, args=(proc,), daemon=True).start()
+    return True, proc.pid
 
 
 def _launch_claude(prompt: str):
@@ -129,42 +273,25 @@ def _launch_claude(prompt: str):
         _run["log"] = []
     _run["status"] = "running"
 
-    _append_log(f"── 启动 Claude Code ──\n{prompt}\n── 开始执行 ──\n")
-
-    proc = subprocess.Popen(
-        [CLAUDE_BIN, "--dangerously-skip-permissions", "-p", prompt],
-        cwd=str(ROOT),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-    _run["proc"] = proc
-    _run["pid"]  = proc.pid
-    threading.Thread(target=_stream_proc, args=(proc,), daemon=True).start()
-    return True, proc.pid
+    cmd = [CLAUDE_BIN, "--dangerously-skip-permissions", "-p", prompt]
+    header = f"── 启动 Claude Code ──\n{prompt}\n── 开始执行 ──\n"
+    return _run_claude(cmd, header)
 
 
 def _intervene(message: str):
-    """用 --continue 把干预消息追加进同一个 Claude 会话。"""
+    """追加干预消息：有记录的 session_id 则用 -r 恢复，否则用 --continue。"""
     if _run["status"] == "running":
         return False, "有任务正在运行，请等待完成后再干预"
 
     _run["status"] = "running"
-    _append_log(f"\n── 干预消息 ──\n{message}\n── 继续执行 ──\n")
-
-    proc = subprocess.Popen(
-        [CLAUDE_BIN, "--dangerously-skip-permissions", "--continue", "-p", message],
-        cwd=str(ROOT),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-    _run["proc"] = proc
-    _run["pid"]  = proc.pid
-    threading.Thread(target=_stream_proc, args=(proc,), daemon=True).start()
-    return True, proc.pid
+    sid = _run.get("session_id")
+    if sid:
+        cmd = [CLAUDE_BIN, "--dangerously-skip-permissions", "-r", sid, "-p", message]
+        header = f"\n── 干预（续接会话 {sid[:8]}…）──\n{message}\n── 继续执行 ──\n"
+    else:
+        cmd = [CLAUDE_BIN, "--dangerously-skip-permissions", "-p", message]
+        header = f"\n── 新会话指令 ──\n{message}\n── 开始执行 ──\n"
+    return _run_claude(cmd, header)
 
 
 # ── FastAPI ───────────────────────────────────────────────────────────────────

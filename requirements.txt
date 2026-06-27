@@ -1,3 +1,36 @@
+# 核心
 requests>=2.31
 PyYAML>=6.0
-anthropic>=0.40    # 仅 classify.use_llm: true 时需要
+anthropic>=0.40
+
+# Dashboard
+fastapi>=0.100
+uvicorn[standard]>=0.20
+pydantic>=2.0
+
+# 数据处理
+pandas>=2.0
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+mplfinance>=0.12
+
+# 金融数据
+baostock>=0.9
+yfinance>=1.0
+ccxt>=4.5
+
+# 网络
+aiohttp>=3.8
+httpx>=0.24
+beautifulsoup4>=4.12
+lxml>=5.0
+
+# 工具
+playwright>=1.40
+psutil>=5.9
+python-dotenv>=1.0
+cryptography<44      # ccxt 依赖，限制版本避免 Rust 构建失败
+
+# OCR（小红书图片文字提取）
+pyobjc-framework-Vision  # macOS 内置 OCR，替代 easyocr；torch/easyocr 暂无 Python 3.14 支持

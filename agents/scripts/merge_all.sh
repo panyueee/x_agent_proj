@@ -1,5 +1,5 @@
 #!/bin/bash
-# 把四个 feature 分支合并进 main
+# 把六个 feature 分支合并进 main
 # 用法：bash agents/scripts/merge_all.sh
 
 set -e
@@ -7,7 +7,7 @@ cd "$(dirname "$0")/../.."
 
 git checkout main
 
-for branch in feature/x feature/xhs feature/tgb feature/finance; do
+for branch in feature/x feature/xhs feature/tgb feature/finance feature/industry feature/research; do
     if git show-ref --verify --quiet "refs/heads/$branch"; then
         echo "=== merge $branch ==="
         git merge "$branch" --no-edit
@@ -18,4 +18,4 @@ done
 
 echo ""
 echo "=== 最新 git log ==="
-git log --oneline -6
+git log --oneline -8

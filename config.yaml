@@ -291,3 +291,88 @@ tgb:
       name: 五粮液
     - code: "300750"
       name: 宁德时代
+
+industry:
+  enabled: true
+  chains:
+    - name: 新能源汽车
+      sector_code: "BK0471"
+      keywords:
+        - 宁德时代
+        - 比亚迪
+        - 汽车电池
+        - 碳酸锂
+        - 磷酸铁锂
+      core_stocks:
+        - code: "300750"
+          name: 宁德时代
+          role: core
+        - code: "002594"
+          name: 比亚迪
+          role: core
+        - code: "002460"
+          name: 赣锋锂业
+          role: upstream
+        - code: "603659"
+          name: 璞泰来
+          role: upstream
+        - code: "002841"
+          name: 视源股份
+          role: downstream
+
+    - name: AI算力
+      sector_code: "BK0493"
+      keywords:
+        - AI芯片
+        - 算力
+        - 大模型
+        - GPU
+        - 智算中心
+      core_stocks:
+        - code: "688041"
+          name: 海光信息
+          role: core
+        - code: "002415"
+          name: 海康威视
+          role: downstream
+        - code: "300308"
+          name: 中际旭创
+          role: upstream
+        - code: "688256"
+          name: 寒武纪
+          role: core
+
+research:
+  enabled: true
+  report_days: 90          # 拉取最近 N 天的研报
+  min_rating_count: 3      # 评级数量低于此值时不生成摘要
+  watch_stocks:
+    - code: "300750"
+      name: 宁德时代
+      suppliers:
+        - name: 赣锋锂业
+          code: "002460"
+        - name: 华友钴业
+          code: "603799"
+        - name: 恩捷股份
+          code: "002812"
+
+    - code: "600519"
+      name: 贵州茅台
+      suppliers: []
+
+    - code: "688041"
+      name: 海光信息
+      suppliers:
+        - name: 台积电
+          code: ""
+        - name: 中芯国际
+          code: "688981"
+
+    - code: "002594"
+      name: 比亚迪
+      suppliers:
+        - name: 宁德时代
+          code: "300750"
+        - name: 弗迪电池
+          code: ""

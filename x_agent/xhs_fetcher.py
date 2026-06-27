@@ -1,8 +1,8 @@
-"""小红书数据抓取层：xhs CLI + EasyOCR 图片文字提取。
+"""小红书数据抓取层：xhs CLI + Apple Vision 图片文字提取。
 
 依赖：
   - xhs CLI（uv tool install xiaohongshu-cli，需已登录）
-  - easyocr（uv pip install easyocr）
+  - pyobjc-framework-Vision（macOS 内置 OCR，中文支持极佳，无需模型下载）
 """
 from __future__ import annotations
 
@@ -18,15 +18,23 @@ TMP_IMG  = "/tmp/xhs_ocr.jpg"
 HEADERS  = {"Referer": "https://www.xiaohongshu.com", "User-Agent": "Mozilla/5.0"}
 MAX_IMGS = 3   # 每条笔记最多 OCR 几张图
 
-_ocr = None   # 延迟初始化，避免每次 import 都加载模型
 
-def _get_ocr():
-    global _ocr
-    if _ocr is None:
-        import easyocr
-        print("[xhs] 加载 OCR 模型（首次约 30s）...")
-        _ocr = easyocr.Reader(["ch_sim", "en"], gpu=False, verbose=False)
-    return _ocr
+def _apple_vision_ocr(image_path: str) -> str:
+    """用 macOS 内置 Vision 框架识别图片文字，中英文均支持。"""
+    try:
+        import Vision
+        from Foundation import NSURL
+        url = NSURL.fileURLWithPath_(image_path)
+        handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, {})
+        req = Vision.VNRecognizeTextRequest.alloc().init()
+        req.setRecognitionLanguages_(["zh-Hans", "zh-Hant", "en-US"])
+        req.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+        handler.performRequests_error_([req], None)
+        results = req.results() or []
+        return " ".join(r.topCandidates_(1)[0].string() for r in results if r.topCandidates_(1))
+    except Exception as e:
+        print(f"[xhs] Apple Vision OCR 失败: {e}")
+        return ""
 
 
 def _run_xhs(*args) -> dict:
@@ -47,22 +55,20 @@ def _parse_time(ms_timestamp) -> str:
 
 
 def _ocr_images(image_list: list) -> str:
-    ocr = _get_ocr()
     texts = []
-    seen_urls = set()   # 去重：同一批图片中跳过重复 URL
+    seen_urls = set()
     for img in image_list[:MAX_IMGS]:
         url = img.get("url_default") or img.get("url_pre") or ""
-        if not url:
-            continue
-        if url in seen_urls:
+        if not url or url in seen_urls:
             continue
         seen_urls.add(url)
         try:
             r = requests.get(url, headers=HEADERS, timeout=10)
             with open(TMP_IMG, "wb") as f:
                 f.write(r.content)
-            lines = ocr.readtext(TMP_IMG, detail=0)
-            texts.extend(lines)
+            text = _apple_vision_ocr(TMP_IMG)
+            if text:
+                texts.append(text)
         except Exception as e:
             print(f"[xhs] OCR 失败: {e}")
     return " ".join(texts)

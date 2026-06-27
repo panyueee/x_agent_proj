@@ -57,7 +57,7 @@ def scrape_article(url):
         lines = [l.strip() for l in text.split("\n") if l.strip()]
         title  = lines[0] if lines else ""
         meta   = lines[1] if len(lines) > 1 else ""
-        body   = "\n".join(lines[2:])[:800]
+        body   = "\n".join(lines[2:])[:1000]
         # 收集文章内图片的 alt 文字（可能含有用信息）
         img_alts = page.eval_on_selector_all("img[alt]", "els => els.map(e => e.alt).filter(a => a.length > 2)")
         if img_alts:
@@ -82,6 +82,40 @@ def scrape_article(url):
         }
 
 
+def scrape_stock_posts(stock_code, max_results):
+    """抓个股讨论帖列表，返回帖子 URL 与标题列表。"""
+    url = f"{BASE}/stock/{stock_code}"
+    results = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_context(user_agent=UA, locale="zh-CN").new_page()
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        # 滚动加载，最多 8 次
+        prev_count = 0
+        for _ in range(8):
+            page.keyboard.press("End")
+            page.wait_for_timeout(1000)
+            cur = len(page.query_selector_all("a[href*='/post/'], a[href*='/t/'], a[href*='/a/'], a[href*='/Article/']"))
+            if cur == prev_count and cur > 0:
+                break
+            prev_count = cur
+        page.wait_for_timeout(1500)
+        for a in page.query_selector_all("a"):
+            href = a.get_attribute("href") or ""
+            if (re.search(r"/post/\d+", href)
+                    or re.search(r"/t/\d+", href)
+                    or re.match(r"^/a/\w+$", href)
+                    or re.search(r"/Article/\d+", href)):
+                title = a.inner_text().strip()
+                if title:
+                    full = href if href.startswith("http") else BASE + href
+                    results.append({"url": full, "title": title})
+                    if len(results) >= max_results:
+                        break
+        browser.close()
+    return results
+
+
 if __name__ == "__main__":
     mode = sys.argv[1]
     if mode == "blog":
@@ -90,3 +124,6 @@ if __name__ == "__main__":
     elif mode == "article":
         url = sys.argv[2]
         print(json.dumps(scrape_article(url), ensure_ascii=False))
+    elif mode == "stock":
+        stock_code, max_r = sys.argv[2], int(sys.argv[3])
+        print(json.dumps(scrape_stock_posts(stock_code, max_r), ensure_ascii=False))

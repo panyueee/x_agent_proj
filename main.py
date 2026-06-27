@@ -112,11 +112,21 @@ def fetch_tgb(cfg, since):
     collected = []
     client = TgbClient()
     for user in tgb_cfg.get("users", []):
-        uid = user.get("id") or user if isinstance(user, str) else ""
+        uid = user.get("id") if isinstance(user, dict) else user
+        if not uid:
+            continue
         try:
             collected += client.user_posts(uid, tgb_cfg.get("max_per_user", 10), since)
         except Exception as e:
             print(f"[warn] 淘股吧用户 {uid}: {e}")
+    for stock in tgb_cfg.get("stocks", []):
+        code = stock.get("code") if isinstance(stock, dict) else stock
+        if not code:
+            continue
+        try:
+            collected += client.stock_posts(code, tgb_cfg.get("max_per_stock", 10), since)
+        except Exception as e:
+            print(f"[warn] 淘股吧个股 {code}: {e}")
     return collected
 
 

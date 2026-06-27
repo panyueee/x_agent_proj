@@ -225,9 +225,17 @@ xhs:
 tgb:
   enabled: true
   max_per_user: 10
+  max_per_stock: 10
   users:
     # 格式：id 为淘股吧用户数字 ID（URL /blog/<id> 中的数字），name 为昵称（仅供备注）
     - id: "11056656"
       name: 米开朗基瑞
   # 可继续添加：- id: "用户ID"
   #               name: 昵称
+  stocks:
+    - code: "600519"
+      name: 贵州茅台
+    - code: "000858"
+      name: 五粮液
+    - code: "300750"
+      name: 宁德时代

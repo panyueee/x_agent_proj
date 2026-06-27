@@ -157,13 +157,24 @@ class ThirdPartyXClient:
         self.inactive_accounts = set()  # type: ignore[type-arg]
 
     def _get(self, endpoint: str, params: dict) -> dict:
-        """带节流与 429 退避的 GET 请求。"""
+        """带节流、429 退避与网络错误指数退避的 GET 请求。"""
         wait = self.min_interval - (time.time() - self._last_call)
         if wait > 0:
             time.sleep(wait)
         url = self.base_url + endpoint
+        # 网络错误指数退避延迟：5s / 10s / 20s
+        _network_delays = [5, 10, 20]
         for attempt in range(5):
-            r = self.session.get(url, params=params, timeout=30)
+            try:
+                r = self.session.get(url, params=params, timeout=30)
+            except requests.exceptions.RequestException as exc:
+                net_attempt = min(attempt, len(_network_delays) - 1)
+                delay = _network_delays[net_attempt]
+                print(f"[3rd] 网络错误（第 {attempt + 1} 次），{delay}s 后重试：{exc}")
+                if attempt >= 2:
+                    raise XClientError(f"网络请求连续失败，已放弃：{exc}") from exc
+                time.sleep(delay)
+                continue
             self._last_call = time.time()
             if r.status_code == 429:
                 sleep_for = 15 * (attempt + 1)

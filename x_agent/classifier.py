@@ -48,10 +48,51 @@ WEB3_KEYWORDS_ZH = {
     "协议": 1, "代币": 1, "公链": 1, "矿工": 1,
 }
 
+# A股 / 美股相关词及权重（英文）
+STOCK_KEYWORDS = {
+    "earnings": 3, "eps": 3, "guidance": 2, "revenue": 2,
+    "ipo": 2, "buyback": 2, "dividend": 2, "pe ratio": 2,
+    "bull run": 2, "bear market": 2, "rally": 1, "pullback": 1,
+    "52 week high": 2, "breakout": 1, "sector rotation": 2,
+    "fed": 1, "fomc": 2, "rate hike": 2, "rate cut": 2,
+    "unemployment": 1, "gdp": 1, "inflation": 1, "cpi": 2,
+}
+
+# A股相关词及权重（中文）
+STOCK_KEYWORDS_ZH = {
+    "涨停": 3, "跌停": 3, "板块": 2, "龙头": 2, "打板": 2,
+    "主力": 2, "游资": 2, "北向资金": 2, "融资融券": 2,
+    "炒股": 1, "个股": 1, "大盘": 1, "指数": 1, "沪深": 1,
+    "创业板": 1, "科创板": 2, "A股": 1, "港股": 1, "美股": 1,
+    "财报": 2, "业绩": 2, "营收": 2, "净利润": 2, "分红": 2,
+    "ETF": 2, "基金": 1, "可转债": 2, "配股": 2,
+}
+
+# 股票/财务相关词及权重（英文）—— finance 类别
+FINANCE_KEYWORDS = {
+    "earnings": 3, "revenue": 3, "guidance": 2, "pe ratio": 2,
+    "eps": 2, "net income": 2, "gross margin": 2, "operating income": 2,
+    "annual report": 2, "quarterly results": 2, "profit": 1, "loss": 1,
+    "market cap": 1, "valuation": 1, "dividend": 1, "buyback": 1,
+}
+
+# 股票/财务相关词及权重（中文）—— finance 类别
+FINANCE_KEYWORDS_ZH = {
+    "市盈率": 2, "财报": 3, "营收": 3, "净利润": 2, "毛利率": 2,
+    "大盘": 1, "龙头": 2, "涨停": 3, "跌停": 3,
+    "主力": 2, "筹码": 2, "游资": 2, "北向资金": 2,
+    "业绩": 2, "分红": 1, "配股": 2, "可转债": 2,
+    "估值": 1, "市值": 1, "利润": 1, "亏损": 1,
+}
+
 TICKER_RE = re.compile(r"\$[A-Za-z]{2,6}\b")   # $BTC $ETH $SOL ...
+# A股股票代码：以 0（深主板）、3（创业板/深交所）、6（沪主板）开头的6位数字
+ASHARE_RE = re.compile(r'\b([036]\d{5})\b')
 
 STRATEGY_THRESHOLD = 3
 WEB3_THRESHOLD = 3
+STOCK_THRESHOLD = 3
+FINANCE_THRESHOLD = 3
 
 # 广告 / 垃圾账号黑名单关键词（全小写，命中任一即视为 spam，直接返回 none）
 SPAM_KEYWORDS = [
@@ -66,7 +107,7 @@ SPAM_KEYWORDS = [
 @dataclass
 class Signal:
     tweet_id: str
-    category: str            # strategy | web3 | both | none
+    category: str            # strategy | web3 | finance | both | both+finance | none
     score: int
     tickers: list = field(default_factory=list)
     extracted: dict = field(default_factory=dict)   # LLM 抽取的结构化字段
@@ -91,22 +132,49 @@ def classify(tweet: Tweet) -> Signal:
 
     s_score = _score(tweet.text, STRATEGY_KEYWORDS) + _score_zh(tweet.text, STRATEGY_KEYWORDS_ZH)
     w_score = _score(tweet.text, WEB3_KEYWORDS) + _score_zh(tweet.text, WEB3_KEYWORDS_ZH)
+    st_score = _score(tweet.text, STOCK_KEYWORDS) + _score_zh(tweet.text, STOCK_KEYWORDS_ZH)
+    f_score = _score(tweet.text, FINANCE_KEYWORDS) + _score_zh(tweet.text, FINANCE_KEYWORDS_ZH)
+    # A股股票代码（6位数字，0/3/6开头）命中也加分
+    if re.search(r'\b[036]\d{5}\b', tweet.text):
+        st_score += 1
+        f_score += 1
+
     tickers = sorted(set(TICKER_RE.findall(tweet.text)))
+    # 提取 A股股票代码，一并并入 tickers 列表
+    ashare_tickers = ASHARE_RE.findall(tweet.text)
+    if ashare_tickers:
+        tickers = sorted(set(tickers + ashare_tickers))
     if tickers:
         s_score += 1   # 带 $TICKER 更像是行情/策略
 
     is_strategy = s_score >= STRATEGY_THRESHOLD
     is_web3 = w_score >= WEB3_THRESHOLD
-    if is_strategy and is_web3:
-        cat = "both"
-    elif is_strategy:
-        cat = "strategy"
-    elif is_web3:
-        cat = "web3"
-    else:
-        cat = "none"
+    is_stock = st_score >= STOCK_THRESHOLD
+    is_finance = f_score >= FINANCE_THRESHOLD
 
-    return Signal(tweet.id, cat, max(s_score, w_score), tickers)
+    # 组合 category：支持 strategy+finance、both+finance 等用 + 拼接的组合
+    cats = []
+    if is_strategy:
+        cats.append("strategy")
+    if is_web3:
+        cats.append("web3")
+    if is_stock:
+        cats.append("stock")
+    if is_finance:
+        cats.append("finance")
+
+    if len(cats) == 0:
+        cat = "none"
+    elif "strategy" in cats and "web3" in cats and len(cats) > 2:
+        # strategy + web3 + 其他（finance 或 stock）时用 both+ 前缀
+        extras = [c for c in cats if c not in ("strategy", "web3")]
+        cat = "both+" + "+".join(extras)
+    elif "strategy" in cats and "web3" in cats:
+        cat = "both"
+    else:
+        cat = "+".join(cats)
+
+    return Signal(tweet.id, cat, max(s_score, w_score, st_score, f_score), tickers)
 
 
 # ---------- 可选：用 Claude 抽取结构化策略 ----------

@@ -14,6 +14,14 @@ searches:
   label: crypto_strategy_zh
 - query: (空投 OR 主网 OR 测试网 OR 质押 OR 链上) (web3 OR defi OR 去中心化) -is:retweet lang:zh
   label: web3_news_zh
+- query: (earnings OR revenue OR EPS OR guidance) ($AAPL OR $TSLA OR $NVDA OR $MSFT OR $AMZN) -is:retweet lang:en
+  label: us_stock_earnings
+- query: (涨停 OR 跌停 OR 龙头 OR 板块 OR 打板) (A股 OR 沪深 OR 创业板) -is:retweet lang:zh
+  label: a_stock_news
+- query: (FOMC OR "rate cut" OR "rate hike" OR CPI OR "fed rate") -is:retweet lang:en
+  label: macro_us
+- query: (财报 OR 业绩 OR 营收 OR 净利润) (A股 OR 港股) -is:retweet lang:zh
+  label: a_stock_earnings_zh
 fetch:
   max_per_account: 5
   max_per_search: 30

@@ -1,15 +1,15 @@
-"""主程序：加载配置 → 抓取 → 分类 → 入库 → 生成摘要，可定时循环。
+"""主程序：加载配置 → 并行抓取 → 分类 → 入库 → 生成摘要，可定时循环。
 
 用法：
-    python main.py [--source x|xhs|all] [config.yaml]
+    python main.py [--source x|xhs|tgb|all] [config.yaml]
 
     --source x    只抓 X (Twitter)
     --source xhs  只抓小红书
-    --source all  两者都抓（默认）
+    --source tgb  只抓淘股吧
+    --source all  三路并行（默认）
 
 环境变量：
-    X_BEARER_TOKEN      官方 X API（provider=official 时）
-    THIRDPARTY_API_KEY  第三方 X API（provider=thirdparty 时）
+    THIRDPARTY_API_KEY  第三方 X API
     ANTHROPIC_API_KEY   仅 use_llm: true 时需要
 """
 from __future__ import annotations
@@ -20,6 +20,7 @@ import sys
 import time
 import argparse
 import datetime as dt
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import yaml
 
@@ -28,6 +29,7 @@ from x_agent.classifier import classify, extract_with_llm
 from x_agent.storage import Store
 from x_agent.digest import build_digest
 from x_agent.xhs_fetcher import XhsClient
+from x_agent.tgb_fetcher import TgbClient
 
 
 def _expand_env(value):
@@ -40,12 +42,12 @@ def _expand_env(value):
     return value
 
 
-def load_config(path: str = "config.yaml") -> dict:
+def load_config(path="config.yaml"):
     with open(path, encoding="utf-8") as f:
         return _expand_env(yaml.safe_load(f))
 
 
-def fetch_x(cfg: dict, client, since: dt.datetime) -> list:
+def fetch_x(cfg, client, since):
     collected = []
     groups = cfg.get("account_groups", {})
     if not groups and cfg.get("accounts"):
@@ -69,10 +71,10 @@ def fetch_x(cfg: dict, client, since: dt.datetime) -> list:
     return collected
 
 
-def fetch_xhs(cfg: dict, since: dt.datetime) -> list:
+def fetch_xhs(cfg, since):
     xhs_cfg = cfg.get("xhs", {})
     if not xhs_cfg.get("enabled"):
-        print("[xhs] 未启用，跳过（config.yaml 中设 xhs.enabled: true 开启）")
+        print("[xhs] 未启用，跳过")
         return []
     collected = []
     xhs = XhsClient()
@@ -91,21 +93,42 @@ def fetch_xhs(cfg: dict, since: dt.datetime) -> list:
     return collected
 
 
-def run_once(cfg: dict, client, store: Store, source: str, llm=None) -> None:
+def fetch_tgb(cfg, since):
+    tgb_cfg = cfg.get("tgb", {})
+    if not tgb_cfg.get("enabled"):
+        print("[tgb] 未启用，跳过")
+        return []
+    collected = []
+    client = TgbClient()
+    for user in tgb_cfg.get("users", []):
+        uid = user.get("id") or user if isinstance(user, str) else ""
+        try:
+            collected += client.user_posts(uid, tgb_cfg.get("max_per_user", 10), since)
+        except Exception as e:
+            print(f"[warn] 淘股吧用户 {uid}: {e}")
+    return collected
+
+
+def run_once(cfg, client, store, source, llm=None):
     since = dt.datetime.utcnow() - dt.timedelta(hours=cfg["fetch"]["lookback_hours"])
     collected = []
 
-    if source in ("x", "all"):
-        print("[X] 开始抓取...")
-        x_data = fetch_x(cfg, client, since)
-        print(f"[X] 抓取 {len(x_data)} 条")
-        collected += x_data
+    tasks = {}
+    with ThreadPoolExecutor(max_workers=3) as exe:
+        if source in ("x", "all") and client:
+            tasks["X"] = exe.submit(fetch_x, cfg, client, since)
+        if source in ("xhs", "all"):
+            tasks["小红书"] = exe.submit(fetch_xhs, cfg, since)
+        if source in ("tgb", "all"):
+            tasks["淘股吧"] = exe.submit(fetch_tgb, cfg, since)
 
-    if source in ("xhs", "all"):
-        print("[小红书] 开始抓取...")
-        xhs_data = fetch_xhs(cfg, since)
-        print(f"[小红书] 抓取 {len(xhs_data)} 条")
-        collected += xhs_data
+        for name, future in tasks.items():
+            try:
+                data = future.result()
+                print(f"[{name}] 抓取 {len(data)} 条")
+                collected += data
+            except Exception as e:
+                print(f"[{name}] 抓取失败: {e}")
 
     new = kept = 0
     for tw in collected:
@@ -124,15 +147,17 @@ def run_once(cfg: dict, client, store: Store, source: str, llm=None) -> None:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="X + 小红书资讯抓取 Agent")
-    parser.add_argument("--source", choices=["x", "xhs", "all"], default="all",
-                        help="数据来源：x=只抓X，xhs=只抓小红书，all=全部（默认）")
-    parser.add_argument("config", nargs="?", default="config.yaml", help="配置文件路径")
+    parser = argparse.ArgumentParser(description="X + 小红书 + 淘股吧资讯抓取 Agent")
+    parser.add_argument(
+        "--source", choices=["x", "xhs", "tgb", "all"], default="all",
+        help="数据来源：x / xhs / tgb / all（默认，三路并行）"
+    )
+    parser.add_argument("config", nargs="?", default="config.yaml")
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
+def main():
+    args   = parse_args()
     cfg    = load_config(args.config)
     store  = Store(cfg["storage"]["db_path"])
     client = build_client(cfg) if args.source in ("x", "all") else None

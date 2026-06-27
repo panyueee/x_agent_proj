@@ -51,7 +51,12 @@ class Store:
         return cur.fetchone() is not None
 
     def save(self, tweet: Tweet, signal: Signal) -> None:
-        source = "xiaohongshu" if tweet.group_tag == "xiaohongshu" else "twitter"
+        if tweet.group_tag == "xiaohongshu":
+            source = "xiaohongshu"
+        elif tweet.group_tag == "taoguba":
+            source = "taoguba"
+        else:
+            source = "twitter"
         self.conn.execute(
             "INSERT OR REPLACE INTO tweets VALUES (?,?,?,?,?,?,?,?,?,?)",
             (

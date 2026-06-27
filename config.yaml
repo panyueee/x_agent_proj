@@ -217,3 +217,9 @@ xhs:
     - query: 合约交易 止损
       label: xhs_contract
   accounts: []   # 填入要监控的小红书用户名
+tgb:
+  enabled: true
+  max_per_user: 10
+  users:
+    - id: "11056656"
+      name: 米开朗基瑞

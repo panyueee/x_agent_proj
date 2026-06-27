@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import concurrent.futures
 import subprocess
 import datetime as dt
 import requests
@@ -48,10 +49,14 @@ def _parse_time(ms_timestamp) -> str:
 def _ocr_images(image_list: list) -> str:
     ocr = _get_ocr()
     texts = []
+    seen_urls = set()   # 去重：同一批图片中跳过重复 URL
     for img in image_list[:MAX_IMGS]:
         url = img.get("url_default") or img.get("url_pre") or ""
         if not url:
             continue
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
         try:
             r = requests.get(url, headers=HEADERS, timeout=10)
             with open(TMP_IMG, "wb") as f:
@@ -61,6 +66,21 @@ def _ocr_images(image_list: list) -> str:
         except Exception as e:
             print(f"[xhs] OCR 失败: {e}")
     return " ".join(texts)
+
+
+def _parse_count(val) -> int:
+    """把 '1.2万'、'3k'、123 统一转成整数。"""
+    if val is None:
+        return 0
+    s = str(val).strip().replace(",", "")
+    try:
+        if "万" in s:
+            return int(float(s.replace("万", "")) * 10000)
+        if "k" in s.lower():
+            return int(float(s.lower().replace("k", "")) * 1000)
+        return int(float(s))
+    except (ValueError, TypeError):
+        return 0
 
 
 def _card_to_tweet(note_id: str, card: dict, label: str) -> Tweet:
@@ -75,7 +95,10 @@ def _card_to_tweet(note_id: str, card: dict, label: str) -> Tweet:
     else:
         ocr_text = _ocr_images(imgs) if imgs else ""
 
-    text = " ".join(filter(None, [title, desc, ocr_text]))
+    # 从 tag_list 提取话题词，丰富文本内容供分类器打分
+    tags = card.get("tag_list") or []
+    tag_text = " ".join(t.get("name", "") for t in tags if t.get("name"))
+    text = " ".join(filter(None, [title, desc, ocr_text, tag_text]))
 
     # last_update_time 为毫秒时间戳；部分笔记用 time 字段；容错处理 0 值
     ts_ms = card.get("last_update_time") or card.get("time") or 0
@@ -90,10 +113,12 @@ def _card_to_tweet(note_id: str, card: dict, label: str) -> Tweet:
     else:
         created_at = ""
 
+    # 用 _parse_count 统一处理字符串形式的数字（如 "1.2万"、"3k"）
+    interact = card.get("interact_info") or {}
     metrics = {
-        "liked_count":     card.get("interact_info", {}).get("liked_count", 0),
-        "collected_count": card.get("interact_info", {}).get("collected_count", 0),
-        "comment_count":   card.get("interact_info", {}).get("comment_count", 0),
+        "liked_count":     _parse_count(interact.get("liked_count")),
+        "collected_count": _parse_count(interact.get("collected_count")),
+        "comment_count":   _parse_count(interact.get("comment_count")),
     }
     return Tweet(
         id=f"xhs_{note_id}",
@@ -122,24 +147,32 @@ def _read_note(note_id: str) -> dict:
 class XhsClient:
     """小红书抓取客户端，接口与 OfficialXClient 对齐。"""
 
-    def search(self, query: str, max_results: int, since: dt.datetime, label: str) -> list[Tweet]:
+    def search(self, query: str, max_results: int, since: dt.datetime, label: str) -> list:
         data  = _run_xhs("search", query, "--sort", "latest")
         items = (data.get("data") or {}).get("items") or []
         results = []
+        since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
         for item in items[:max_results]:
             note_id = item.get("id") or ""
             if not note_id or "#" in note_id:   # 跳过广告占位
                 continue
-            card = _read_note(note_id)
+            # 用线程池给 _read_note 加 15s 超时，防止 CLI 挂住
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(_read_note, note_id)
+                    card = future.result(timeout=15)
+            except concurrent.futures.TimeoutError:
+                print(f"[xhs] _read_note({note_id}) 超时，跳过")
+                continue
             if not card:
                 continue
             tw = _card_to_tweet(note_id, card, label)
-            if tw.created_at and tw.created_at < since.strftime("%Y-%m-%dT%H:%M:%SZ"):
+            if tw.created_at and tw.created_at < since_str:
                 continue
             results.append(tw)
         return results
 
-    def user_posts(self, username: str, max_results: int, since: dt.datetime) -> list[Tweet]:
+    def user_posts(self, username: str, max_results: int, since: dt.datetime) -> list:
         data  = _run_xhs("user-posts", username)
         items = (data.get("data") or {}).get("items") or []
         results = []

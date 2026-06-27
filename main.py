@@ -1,13 +1,16 @@
 """主程序：加载配置 → 并行抓取 → 分类 → 入库 → 生成摘要，可定时循环。
 
 用法：
-    python main.py [--source x|xhs|tgb|finance|all] [config.yaml]
+    python main.py [--source x|xhs|tgb|finance|industry|research|pipeline|all] [config.yaml]
 
-    --source x       只抓 X (Twitter)
-    --source xhs     只抓小红书
-    --source tgb     只抓淘股吧
-    --source finance 只抓金融行情（A股/美股/加密货币）
-    --source all     四路并行（默认）
+    --source x        只抓 X (Twitter)
+    --source xhs      只抓小红书
+    --source tgb      只抓淘股吧
+    --source finance  只抓金融行情（A股/美股/加密货币）
+    --source industry 只跑产业链深挖（消费 pending industry_trigger 事件）
+    --source research 只跑研报跟进（消费 pending research_trigger 事件）
+    --source pipeline X + 产业链 + 研报 三步联动（先抓 X，再自动触发后续）
+    --source all      六路并行（默认）
 
 环境变量：
     THIRDPARTY_API_KEY  第三方 X API
@@ -32,6 +35,9 @@ from x_agent.digest import build_digest
 from x_agent.xhs_fetcher import XhsClient
 from x_agent.tgb_fetcher import TgbClient
 from x_agent.finance_fetcher import FinanceClient
+from x_agent.industry_fetcher import IndustryClient, IndustryNode
+from x_agent.research_fetcher import ResearchClient
+from x_agent.pipeline import run_pipeline, run_industry_step, run_research_step
 
 
 def _expand_env(value):
@@ -190,6 +196,31 @@ def fetch_finance(cfg, _since):
 
 
 def run_once(cfg, client, store, source, llm=None):
+    # ── pipeline 模式：X 抓取完后自动触发产业链→研报联动 ──
+    if source == "pipeline":
+        since = dt.datetime.utcnow() - dt.timedelta(hours=cfg["fetch"]["lookback_hours"])
+        if client:
+            tweets = fetch_x(cfg, client, since)
+            _save_tweets(tweets, store, cfg, llm)
+        run_pipeline(store, cfg)
+        return
+
+    # ── 独立模块模式 ──
+    if source == "industry":
+        nodes = fetch_industry(cfg, None)
+        for node in nodes:
+            store.save_industry_node(node)
+        print(f"[industry] 保存节点 {len(nodes)} 个")
+        return
+
+    if source == "research":
+        reports = fetch_research(cfg, None)
+        for r in reports:
+            store.save_report(r)
+        print(f"[research] 保存研报 {len(reports)} 篇")
+        return
+
+    # ── 常规抓取模式 ──
     since = dt.datetime.utcnow() - dt.timedelta(hours=cfg["fetch"]["lookback_hours"])
     collected = []
 
@@ -209,7 +240,6 @@ def run_once(cfg, client, store, source, llm=None):
             try:
                 data = future.result()
                 if name == "金融行情":
-                    # 行情数据走独立存储路径，不经过分类器
                     finance_bars = data
                     print(f"[{name}] 抓取 {len(data)} 条")
                 else:
@@ -218,7 +248,6 @@ def run_once(cfg, client, store, source, llm=None):
             except Exception as e:
                 print(f"[{name}] 抓取失败: {e}")
 
-    # 保存行情数据（price_bars 表，无需分类）
     saved_bars = 0
     for bar in finance_bars:
         try:
@@ -229,6 +258,18 @@ def run_once(cfg, client, store, source, llm=None):
     if saved_bars:
         print(f"[finance] 已入库 {saved_bars} 条行情")
 
+    _save_tweets(collected, store, cfg, llm)
+
+    # all 模式：X 抓完后顺便扫描联动触发
+    if source == "all":
+        from x_agent.pipeline import scan_x_for_triggers
+        n = scan_x_for_triggers(store, cfg)
+        if n:
+            print(f"[pipeline] 检测到 {n} 条新触发，运行 `--source pipeline` 可深挖")
+
+
+def _save_tweets(collected, store, cfg, llm):
+    """分类并入库推文列表，返回 (new, kept) 计数。"""
     new = kept = 0
     for tw in collected:
         if store.seen(tw.id):
@@ -241,15 +282,68 @@ def run_once(cfg, client, store, source, llm=None):
             sig.extracted = extract_with_llm(tw, cfg["classify"]["llm_model"], llm)
         store.save(tw, sig)
         kept += 1
+    if collected:
+        print(f"合计 {len(collected)} 条 · 新 {new} 条 · 命中信号 {kept} 条")
 
-    print(f"合计 {len(collected)} 条 · 新 {new} 条 · 命中信号 {kept} 条")
+
+def fetch_industry(cfg, _since):
+    """跑产业链深挖：拉取配置中所有产业链的板块成分股和新闻，直接入库。"""
+    industry_cfg = cfg.get("industry", {})
+    if not industry_cfg.get("enabled"):
+        print("[industry] 未启用，跳过")
+        return []
+    client = IndustryClient()
+    nodes = []
+    for chain in industry_cfg.get("chains", []):
+        chain_name = chain["name"]
+        # 保存配置里的核心节点
+        for stock in chain.get("core_stocks", []):
+            nodes.append(IndustryNode(
+                code=stock["code"], name=stock["name"],
+                role=stock.get("role", "core"), chain=chain_name,
+            ))
+        # 拉取板块成分股
+        if chain.get("sector_code"):
+            try:
+                stocks = client.fetch_sector_stocks(chain["sector_code"], max_results=30)
+                for s in stocks:
+                    nodes.append(IndustryNode(
+                        code=s["code"], name=s["name"],
+                        role="core", chain=chain_name,
+                    ))
+            except Exception as e:
+                print(f"[industry] 板块 {chain_name} 抓取失败: {e}")
+    return nodes
+
+
+def fetch_research(cfg, _since):
+    """跑研报跟进：拉取 config 里 watch_stocks 的研报和供应商动态。"""
+    research_cfg = cfg.get("research", {})
+    if not research_cfg.get("enabled"):
+        print("[research] 未启用，跳过")
+        return []
+    client = ResearchClient()
+    reports = []
+    for ws in research_cfg.get("watch_stocks", []):
+        code = ws.get("code", "")
+        if not code:
+            continue
+        try:
+            rpts = client.fetch_reports_eastmoney(code, max_results=10)
+            reports.extend(rpts)
+            print(f"[research] {ws.get('name', code)} 研报 {len(rpts)} 篇")
+        except Exception as e:
+            print(f"[research] {code} 研报抓取失败: {e}")
+    return reports
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="X + 小红书 + 淘股吧 + 金融行情抓取 Agent")
+    parser = argparse.ArgumentParser(description="X + 小红书 + 淘股吧 + 金融行情 + 产业链 + 研报 Agent")
     parser.add_argument(
-        "--source", choices=["x", "xhs", "tgb", "finance", "all"], default="all",
-        help="数据来源：x / xhs / tgb / finance / all（默认，四路并行）"
+        "--source",
+        choices=["x", "xhs", "tgb", "finance", "industry", "research", "pipeline", "all"],
+        default="all",
+        help="数据来源（默认 all）",
     )
     parser.add_argument("config", nargs="?", default="config.yaml")
     return parser.parse_args()
@@ -259,7 +353,8 @@ def main():
     args   = parse_args()
     cfg    = load_config(args.config)
     store  = Store(cfg["storage"]["db_path"])
-    client = build_client(cfg) if args.source in ("x", "all") else None
+    needs_x_client = args.source in ("x", "all", "pipeline")
+    client = build_client(cfg) if needs_x_client else None
 
     llm = None
     if cfg["classify"].get("use_llm"):

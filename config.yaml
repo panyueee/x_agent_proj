@@ -376,3 +376,22 @@ research:
           code: "300750"
         - name: 弗迪电池
           code: ""
+
+pipeline:
+  enabled: true
+  digest_path: ./pipeline_digest.md
+  lookback_hours: 48        # 扫描最近多少小时的 X 推文找触发词
+  # 自定义触发规则（覆盖 pipeline.py 内置规则）
+  # 格式：chain 必须与 industry.chains[].name 一致
+  extra_triggers:
+    - chain: AI算力
+      keywords:
+        - Serenity
+        - semiconductor
+        - 算力爆发
+        - AI基础设施
+    - chain: 新能源汽车
+      keywords:
+        - 锂价
+        - 电池降价
+        - 新能源补贴

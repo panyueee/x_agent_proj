@@ -97,6 +97,19 @@ CREATE TABLE IF NOT EXISTS supplier_updates(
 );
 CREATE INDEX IF NOT EXISTS idx_supplier_name  ON supplier_updates(supplier_name);
 CREATE INDEX IF NOT EXISTS idx_supplier_cust  ON supplier_updates(customer_name);
+
+CREATE TABLE IF NOT EXISTS pipeline_events(
+  id           TEXT PRIMARY KEY,   -- hash(source_agent+event_type+payload_key)
+  source_agent TEXT,               -- 触发方：x / industry / research
+  target_agent TEXT,               -- 接收方：industry / research
+  event_type   TEXT,               -- industry_trigger / research_trigger
+  payload      TEXT,               -- JSON：触发内容（话题、股票代码等）
+  status       TEXT DEFAULT 'pending',  -- pending / processing / done / error
+  created_at   TEXT,
+  processed_at TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_status ON pipeline_events(status);
+CREATE INDEX IF NOT EXISTS idx_pipeline_target ON pipeline_events(target_agent, status);
 """
 
 
@@ -325,6 +338,48 @@ class Store:
             (stock_code,),
         ).fetchall()
         return {r[0]: r[1] for r in rows}
+
+    # ---- pipeline 事件队列 ----
+
+    def push_pipeline_event(self, source_agent: str, target_agent: str,
+                             event_type: str, payload: dict, idempotency_key: str = "") -> bool:
+        """写入一条管道事件，以 idempotency_key 去重（相同 key 只写一次）。
+        返回 True 表示新写入，False 表示已存在。
+        """
+        import hashlib
+        key = idempotency_key or f"{source_agent}|{event_type}|{json.dumps(payload, sort_keys=True)}"
+        eid = hashlib.md5(key.encode()).hexdigest()
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO pipeline_events "
+            "(id, source_agent, target_agent, event_type, payload, status, created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (eid, source_agent, target_agent, event_type,
+             json.dumps(payload, ensure_ascii=False),
+             "pending", dt.datetime.utcnow().isoformat()),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def pending_pipeline_events(self, target_agent: str) -> list:
+        """取出指定接收方的所有 pending 事件，返回 dict 列表。"""
+        rows = self.conn.execute(
+            "SELECT id, source_agent, event_type, payload, created_at "
+            "FROM pipeline_events WHERE target_agent=? AND status='pending' "
+            "ORDER BY created_at",
+            (target_agent,),
+        ).fetchall()
+        return [
+            {"id": r[0], "source_agent": r[1], "event_type": r[2],
+             "payload": json.loads(r[3]), "created_at": r[4]}
+            for r in rows
+        ]
+
+    def mark_pipeline_event(self, event_id: str, status: str = "done") -> None:
+        self.conn.execute(
+            "UPDATE pipeline_events SET status=?, processed_at=? WHERE id=?",
+            (status, dt.datetime.utcnow().isoformat(), event_id),
+        )
+        self.conn.commit()
 
     def recent_supplier_updates(self, customer_name: str, limit: int = 20) -> list:
         """返回某核心公司的供应商动态。"""

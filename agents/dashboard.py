@@ -145,6 +145,23 @@ def save_note(agent_id: str, payload: NotePayload):
     return {"ok": True}
 
 
+@app.get("/api/launch-prompt")
+def launch_prompt():
+    """生成粘贴给 Claude Code 的启动指令。"""
+    lines = ["开始新一轮并行开发，各模块指令如下：\n"]
+    has_any = False
+    for a in AGENTS:
+        note = _read_note(a["id"]).strip()
+        if note:
+            lines.append(f"**{a['name']}**：{note}")
+            has_any = True
+        else:
+            lines.append(f"**{a['name']}**：按默认方向继续优化")
+    if not has_any:
+        lines.append("\n（所有模块均按默认方向优化）")
+    return {"prompt": "\n".join(lines)}
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     return HTML
@@ -170,6 +187,46 @@ HTML = """<!DOCTYPE html>
   }
   h1 { font-size: 20px; font-weight: 600; color: #f8fafc; }
   .refresh-info { font-size: 12px; color: #64748b; }
+  .btn-launch {
+    background: linear-gradient(135deg, #7c3aed, #2563eb);
+    color: #fff; border: none; border-radius: 8px;
+    padding: 9px 20px; font-size: 14px; font-weight: 600;
+    cursor: pointer; transition: opacity .15s; white-space: nowrap;
+  }
+  .btn-launch:hover { opacity: .85; }
+
+  /* 弹窗 */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,.7); z-index: 100;
+    align-items: center; justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: #1e2130; border: 1px solid #2d3348;
+    border-radius: 14px; padding: 28px; max-width: 600px; width: 90%;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  .modal h2 { font-size: 16px; font-weight: 600; }
+  .modal p  { font-size: 13px; color: #94a3b8; }
+  .prompt-box {
+    background: #0f1117; border: 1px solid #2d3348; border-radius: 8px;
+    padding: 14px; font-size: 13px; font-family: inherit;
+    color: #e2e8f0; white-space: pre-wrap; line-height: 1.6;
+    max-height: 260px; overflow-y: auto;
+  }
+  .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+  .btn-copy {
+    background: #2563eb; color: #fff; border: none;
+    border-radius: 6px; padding: 8px 18px; font-size: 13px;
+    cursor: pointer; transition: background .15s;
+  }
+  .btn-copy:hover { background: #1d4ed8; }
+  .btn-copy.copied { background: #15803d; }
+  .btn-close {
+    background: #374151; color: #e2e8f0; border: none;
+    border-radius: 6px; padding: 8px 18px; font-size: 13px; cursor: pointer;
+  }
   .grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -235,8 +292,24 @@ HTML = """<!DOCTYPE html>
 <body>
 <header>
   <h1>🤖 Agent 开发看板</h1>
-  <span class="refresh-info" id="refresh-info">30s 后自动刷新</span>
+  <div style="display:flex;align-items:center;gap:16px">
+    <span class="refresh-info" id="refresh-info">30s 后自动刷新</span>
+    <button class="btn-launch" onclick="openLaunch()">🚀 启动新轮开发</button>
+  </div>
 </header>
+
+<!-- 弹窗 -->
+<div class="modal-overlay" id="modal" onclick="closeOnOverlay(event)">
+  <div class="modal">
+    <h2>🚀 启动新轮并行开发</h2>
+    <p>复制下方内容，粘贴到 Claude Code 对话框，即可启动四路并行开发。</p>
+    <div class="prompt-box" id="prompt-text">生成中...</div>
+    <div class="modal-actions">
+      <button class="btn-close" onclick="document.getElementById('modal').classList.remove('open')">取消</button>
+      <button class="btn-copy" id="btn-copy" onclick="copyPrompt()">📋 复制</button>
+    </div>
+  </div>
+</div>
 <div class="grid" id="grid">
   <div class="card" style="justify-content:center;align-items:center;color:#64748b">加载中...</div>
 </div>
@@ -340,6 +413,29 @@ setInterval(() => {
     refresh();
   }
 }, 1000);
+
+async function openLaunch() {
+  document.getElementById('modal').classList.add('open');
+  document.getElementById('btn-copy').textContent = '📋 复制';
+  document.getElementById('btn-copy').classList.remove('copied');
+  const r = await fetch('/api/launch-prompt');
+  const d = await r.json();
+  document.getElementById('prompt-text').textContent = d.prompt;
+}
+
+function copyPrompt() {
+  const text = document.getElementById('prompt-text').textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.getElementById('btn-copy');
+    btn.textContent = '✓ 已复制';
+    btn.classList.add('copied');
+  });
+}
+
+function closeOnOverlay(e) {
+  if (e.target === document.getElementById('modal'))
+    document.getElementById('modal').classList.remove('open');
+}
 
 refresh();
 </script>

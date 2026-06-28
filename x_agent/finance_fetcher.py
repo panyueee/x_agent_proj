@@ -403,3 +403,174 @@ class FinanceClient:
             return self._kline_indices(symbol, secid, days)
         print(f"[finance] 未知 market: {market}")
         return []
+
+    # ---- A股实时行情（带 AKShare fallback）----
+
+    def get_a_share_quote(self, code, name):
+        # type: (str, str) -> Optional[dict]
+        """
+        获取单只 A 股实时行情 dict，先走新浪财经，失败时自动 fallback 到 AKShare。
+        返回字段：price / change_pct / volume / open / high / low / close / name / symbol / timestamp
+        """
+        # 优先走新浪财经（已有实现）
+        try:
+            bars = self.fetch_a_shares([code], [name])
+            if bars:
+                b = bars[0]
+                return {
+                    "symbol": b.symbol,
+                    "name": b.name,
+                    "timestamp": b.timestamp,
+                    "price": b.close,
+                    "open": b.open,
+                    "high": b.high,
+                    "low": b.low,
+                    "close": b.close,
+                    "volume": b.volume,
+                    "change_pct": b.change_pct,
+                }
+        except Exception as e:
+            print(f"[finance] 东财失败，切换 AKShare: {code}（{e}）")
+
+        # fallback 到 AKShare
+        print(f"[finance] 东财失败，切换 AKShare: {code}")
+        ak_client = AKShareClient()
+        return ak_client.get_a_share_quote(code, name)
+
+
+# ---- AKShare 客户端 ----
+
+class AKShareClient:
+    """
+    AKShare 数据客户端，作为东方财富的备份数据源，
+    并补充龙虎榜、北向资金等东财未覆盖的数据。
+    接口签名与 FinanceClient 相关方法保持一致。
+    """
+
+    @staticmethod
+    def _import_ak():
+        """延迟导入 akshare，避免未安装时影响其他模块加载。"""
+        try:
+            import akshare as ak
+            return ak
+        except ImportError:
+            raise ImportError("akshare 未安装，请运行: pip install akshare")
+
+    def get_a_share_quote(self, code, name):
+        # type: (str, str) -> Optional[dict]
+        """
+        通过 AKShare 获取单只 A 股实时行情。
+        返回字段与 FinanceClient.get_a_share_quote 一致。
+        code: 纯数字代码，如 "600519"
+        """
+        try:
+            ak = self._import_ak()
+            # 东方财富实时行情接口：返回全市场 A 股
+            df = ak.stock_zh_a_spot_em()
+            # 代码列名为 "代码"
+            row = df[df["代码"] == code]
+            if row.empty:
+                print(f"[akshare] A股 {code} 未找到行情数据")
+                return None
+            r = row.iloc[0]
+            close = _safe_float(r.get("最新价", 0))
+            prev_close = _safe_float(r.get("昨收", 0))
+            change_pct = ((close - prev_close) / prev_close * 100) if prev_close else 0.0
+            return {
+                "symbol": code,
+                "name": name or str(r.get("名称", code)),
+                "timestamp": _now_iso(),
+                "price": close,
+                "open": _safe_float(r.get("今开", close)),
+                "high": _safe_float(r.get("最高", close)),
+                "low": _safe_float(r.get("最低", close)),
+                "close": close,
+                "volume": _safe_float(r.get("成交量", 0)),
+                "change_pct": change_pct,
+            }
+        except Exception as e:
+            print(f"[akshare] A股 {code} 行情获取失败: {e}")
+            return None
+
+    def get_dragon_tiger(self, days=1):
+        # type: (int) -> List[dict]
+        """
+        拉取 A 股龙虎榜数据（近 N 日），使用 ak.stock_lhb_detail_em。
+        返回 list[dict]，每条包含：date / code / name / reason / buy_amt / sell_amt / net_amt
+        """
+        try:
+            ak = self._import_ak()
+            import pandas as pd
+            end_date = dt.date.today()
+            start_date = end_date - dt.timedelta(days=days)
+            result = []
+            # AKShare 接口：start_date / end_date 格式 "YYYYMMDD"
+            df = ak.stock_lhb_detail_em(
+                start_date=start_date.strftime("%Y%m%d"),
+                end_date=end_date.strftime("%Y%m%d"),
+            )
+            if df is None or df.empty:
+                print("[akshare] 龙虎榜：无数据返回")
+                return []
+            for _, row in df.iterrows():
+                try:
+                    # 字段名以实际接口为准，做容错映射
+                    date_val = str(row.get("上榜日", row.get("date", "")))
+                    code_val = str(row.get("代码", row.get("code", "")))
+                    name_val = str(row.get("名称", row.get("name", "")))
+                    reason_val = str(row.get("上榜原因", row.get("reason", "")))
+                    buy_amt = _safe_float(row.get("买入额", row.get("buy_amt", 0)))
+                    sell_amt = _safe_float(row.get("卖出额", row.get("sell_amt", 0)))
+                    net_amt = buy_amt - sell_amt
+                    result.append({
+                        "date": date_val,
+                        "code": code_val,
+                        "name": name_val,
+                        "reason": reason_val,
+                        "buy_amt": buy_amt,
+                        "sell_amt": sell_amt,
+                        "net_amt": net_amt,
+                    })
+                except Exception as row_e:
+                    print(f"[akshare] 龙虎榜行处理异常: {row_e}")
+            print(f"[akshare] 龙虎榜获取 {len(result)} 条")
+            return result
+        except Exception as e:
+            print(f"[akshare] 龙虎榜获取失败: {e}")
+            return []
+
+    def get_north_flow(self):
+        # type: () -> Optional[float]
+        """
+        拉取当日北向资金净流入（沪股通+深股通合计），
+        使用 ak.stock_hsgt_north_net_flow_in_em。
+        返回净流入金额（亿元，float），失败时返回 None。
+        """
+        try:
+            ak = self._import_ak()
+            # 返回 DataFrame，最新一行为当日数据
+            df = ak.stock_hsgt_north_net_flow_in_em(symbol="沪深港通")
+            if df is None or df.empty:
+                print("[akshare] 北向资金：无数据返回")
+                return None
+            # 取最新一行
+            latest = df.iloc[-1]
+            # 字段名容错：可能为 "date"+"value" 或直接是数值列
+            cols = list(df.columns)
+            # 找数值列（非日期列）
+            val_col = None
+            for c in cols:
+                if c not in ("日期", "date", "Date"):
+                    val_col = c
+                    break
+            if val_col is None:
+                val_col = cols[-1]
+            raw = _safe_float(latest[val_col])
+            # AKShare 北向资金单位通常为亿元，若数值 > 10000 则可能为万元，自动换算
+            if abs(raw) > 100000:
+                raw = raw / 10000.0
+            print(f"[akshare] 北向资金净流入: {raw:.2f} 亿元")
+            return raw
+        except Exception as e:
+            print(f"[akshare] 北向资金获取失败: {e}")
+            return None

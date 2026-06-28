@@ -143,6 +143,26 @@ CREATE TABLE IF NOT EXISTS companies(
 );
 CREATE INDEX IF NOT EXISTS idx_companies_name ON companies(name);
 
+CREATE TABLE IF NOT EXISTS dragon_tiger(
+  id           TEXT PRIMARY KEY,   -- hash(date+code+reason)
+  date         TEXT,               -- 上榜日期 YYYY-MM-DD
+  code         TEXT,               -- 股票代码
+  name         TEXT,               -- 股票名称
+  reason       TEXT,               -- 上榜原因
+  buy_amt      REAL DEFAULT 0.0,   -- 买入额（元）
+  sell_amt     REAL DEFAULT 0.0,   -- 卖出额（元）
+  net_amt      REAL DEFAULT 0.0,   -- 净买入额（元）
+  fetched_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_dragon_tiger_date ON dragon_tiger(date);
+CREATE INDEX IF NOT EXISTS idx_dragon_tiger_code ON dragon_tiger(code);
+
+CREATE TABLE IF NOT EXISTS north_flow(
+  date         TEXT PRIMARY KEY,   -- 日期 YYYY-MM-DD
+  net_flow_b   REAL DEFAULT 0.0,   -- 北向资金净流入（亿元）
+  fetched_at   TEXT
+);
+
 CREATE TABLE IF NOT EXISTS company_persons(
   id            TEXT PRIMARY KEY,   -- hash(credit_code + name + role)
   credit_code   TEXT,               -- 所属企业
@@ -492,6 +512,68 @@ class Store:
              "source": r[4], "confidence": r[5], "extracted_at": r[6]}
             for r in rows
         ]
+
+    # ---- 企查查企业与人员 ----
+
+    # ---- 龙虎榜 ----
+
+    def save_dragon_tiger(self, record):
+        # type: (dict) -> None
+        """保存龙虎榜单条记录，以 date+code+reason 的 hash 去重。"""
+        import hashlib
+        key = "{}|{}|{}".format(
+            record.get("date", ""),
+            record.get("code", ""),
+            record.get("reason", ""),
+        )
+        rid = hashlib.md5(key.encode()).hexdigest()
+        self.conn.execute(
+            "INSERT OR IGNORE INTO dragon_tiger "
+            "(id, date, code, name, reason, buy_amt, sell_amt, net_amt, fetched_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                rid,
+                record.get("date", ""),
+                record.get("code", ""),
+                record.get("name", ""),
+                record.get("reason", ""),
+                record.get("buy_amt", 0.0),
+                record.get("sell_amt", 0.0),
+                record.get("net_amt", 0.0),
+                dt.datetime.utcnow().isoformat(),
+            ),
+        )
+        self.conn.commit()
+
+    def recent_dragon_tiger(self, limit=50):
+        # type: (int) -> list
+        """返回最近的龙虎榜记录，按日期倒序。"""
+        return self.conn.execute(
+            "SELECT date, code, name, reason, buy_amt, sell_amt, net_amt "
+            "FROM dragon_tiger ORDER BY date DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    # ---- 北向资金 ----
+
+    def save_north_flow(self, date, net_flow_b):
+        # type: (str, float) -> None
+        """保存北向资金净流入数据，以日期为主键（当日覆盖写入）。"""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO north_flow (date, net_flow_b, fetched_at) VALUES (?,?,?)",
+            (date, net_flow_b, dt.datetime.utcnow().isoformat()),
+        )
+        self.conn.commit()
+
+    def latest_north_flow(self):
+        # type: () -> Optional[dict]
+        """返回最新一条北向资金数据，字典格式；无数据时返回 None。"""
+        row = self.conn.execute(
+            "SELECT date, net_flow_b FROM north_flow ORDER BY date DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return {"date": row[0], "net_flow_b": row[1]}
 
     # ---- 企查查企业与人员 ----
 

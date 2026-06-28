@@ -34,7 +34,7 @@ from x_agent.storage import Store
 from x_agent.digest import build_digest
 from x_agent.xhs_fetcher import XhsClient
 from x_agent.tgb_fetcher import TgbClient
-from x_agent.finance_fetcher import FinanceClient
+from x_agent.finance_fetcher import FinanceClient, AKShareClient
 from x_agent.industry_fetcher import IndustryClient, IndustryNode
 from x_agent.research_fetcher import ResearchClient
 from x_agent.pipeline import run_pipeline, run_industry_step, run_research_step
@@ -196,6 +196,47 @@ def fetch_finance(cfg, _since):
     return bars
 
 
+def run_akshare_extras(cfg, store):
+    """
+    抓取 AKShare 专属数据（龙虎榜、北向资金），东财未覆盖。
+    每轮调用一次；失败时打印警告但不中断主流程。
+    返回北向资金净流入（亿元）或 None（失败时）。
+    """
+    fin_cfg = cfg.get("finance", {})
+    if not fin_cfg.get("enabled"):
+        return None
+
+    ak_client = AKShareClient()
+    north_flow_val = None
+
+    # ── 龙虎榜（前一日数据）──
+    try:
+        records = ak_client.get_dragon_tiger(days=1)
+        saved_dt = 0
+        for rec in records:
+            try:
+                store.save_dragon_tiger(rec)
+                saved_dt += 1
+            except Exception as e:
+                print(f"[akshare] 龙虎榜入库失败 {rec.get('code', '')}: {e}")
+        if records:
+            print(f"[akshare] 龙虎榜入库 {saved_dt}/{len(records)} 条")
+    except Exception as e:
+        print(f"[akshare] 龙虎榜抓取异常: {e}")
+
+    # ── 北向资金（当日）──
+    try:
+        flow = ak_client.get_north_flow()
+        if flow is not None:
+            today_str = dt.date.today().isoformat()
+            store.save_north_flow(today_str, flow)
+            north_flow_val = flow
+    except Exception as e:
+        print(f"[akshare] 北向资金抓取异常: {e}")
+
+    return north_flow_val
+
+
 def run_once(cfg, client, store, source, llm=None):
     # ── pipeline 模式：X 抓取完后自动触发产业链→研报联动 ──
     if source == "pipeline":
@@ -263,6 +304,11 @@ def run_once(cfg, client, store, source, llm=None):
     if saved_bars:
         print(f"[finance] 已入库 {saved_bars} 条行情")
 
+    # AKShare 专属数据（龙虎榜、北向资金）
+    north_flow_val = None
+    if source in ("finance", "all"):
+        north_flow_val = run_akshare_extras(cfg, store)
+
     _save_tweets(collected, store, cfg, llm)
 
     # all 模式：X 抓完后顺便扫描联动触发，并跑企查查
@@ -272,6 +318,11 @@ def run_once(cfg, client, store, source, llm=None):
         if n:
             print(f"[pipeline] 检测到 {n} 条新触发，运行 `--source pipeline` 可深挖")
         run_qcc(cfg, store)
+
+    # 北向资金摘要输出（finance / all 模式均打印）
+    if north_flow_val is not None:
+        sign = "+" if north_flow_val >= 0 else ""
+        print(f"[摘要] 北向资金：今日净流入 {sign}{north_flow_val:.1f}亿")
 
 
 def _save_tweets(collected, store, cfg, llm):
@@ -446,6 +497,25 @@ def fetch_research(cfg, _since):
     return reports
 
 
+def _append_north_flow_to_digest(store, digest_path):
+    """在摘要文件末尾追加北向资金一行（若当日有数据）。"""
+    try:
+        nf = store.latest_north_flow()
+        if not nf:
+            return
+        today_str = dt.date.today().isoformat()
+        # 只追加当日数据
+        if nf.get("date", "") != today_str:
+            return
+        val = nf["net_flow_b"]
+        sign = "+" if val >= 0 else ""
+        line = "\n\n---\n**北向资金**：今日净流入 {}{:.1f}亿\n".format(sign, val)
+        with open(digest_path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception as e:
+        print(f"[digest] 北向资金追加失败: {e}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="X + 小红书 + 淘股吧 + 金融行情 + 产业链 + 研报 Agent")
     parser.add_argument(
@@ -479,6 +549,8 @@ def main():
     while True:
         run_once(cfg, client, store, args.source, llm)
         build_digest(store, cfg["digest"]["output_path"])
+        # 在摘要文件末尾追加北向资金一行（若有数据）
+        _append_north_flow_to_digest(store, cfg["digest"]["output_path"])
         print(f"摘要已写入 {cfg['digest']['output_path']}")
         if not interval:
             break

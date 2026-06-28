@@ -34,3 +34,6 @@ cryptography<44      # ccxt 依赖，限制版本避免 Rust 构建失败
 
 # OCR（小红书图片文字提取）
 pyobjc-framework-Vision  # macOS 内置 OCR，替代 easyocr；torch/easyocr 暂无 Python 3.14 支持
+
+# 备用金融数据源（AKShare）
+akshare

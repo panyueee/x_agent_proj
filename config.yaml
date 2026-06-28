@@ -379,18 +379,24 @@ research:
 
 qcc:
   enabled: true
-  api_key: ${QCC_API_KEY}
-  secret_key: ${QCC_SECRET_KEY}
-  # 重点关注的企业（填统一社会信用代码）
+  token: ${TYC_TOKEN}   # 天眼查开放平台 Token（开放平台控制台获取，与 SVIP 同账号）
+  # 非上市公司：按天眼查内部 ID 或公司名查（二选一填写）
+  # tyc_id 优先；仅填 name 时会先搜索再取第一个匹配
   watch_companies:
-    - credit_code: "91310000677833975Y"
-      name: 宁德时代新能源科技股份有限公司
-    - credit_code: "914403001922038216"
-      name: 比亚迪股份有限公司
-    - credit_code: "91310115MA1K5FLX0Y"
-      name: 海光信息技术股份有限公司
+    []   # 示例：- name: XX科技有限公司
+         #        tyc_id: ""   # 填写后可跳过搜索步骤，更精准
   # 关键人员追踪（按姓名搜索其关联企业）
   watch_persons: []   # 如：- name: 曾毓群
+  # A 股上市公司（走东方财富免费接口，无需 API key）
+  listed_companies:
+    - code: "300750"
+      name: 宁德时代
+    - code: "002594"
+      name: 比亚迪
+    - code: "688041"
+      name: 海光信息
+    - code: "600519"
+      name: 贵州茅台
 
 pipeline:
   enabled: true

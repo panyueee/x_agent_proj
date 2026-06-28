@@ -333,17 +333,20 @@ def run_qcc(cfg, store):
     try:
         client = build_qcc_client(cfg)
     except QccClientError as e:
-        print(f"[qcc] 企查查客户端未配置（{e}），跳过企查查，继续抓上市公司")
+        print(f"[tyc] 天眼查客户端未配置（{e}），跳过非上市公司，继续抓上市公司")
 
     total_companies = 0
     total_persons = 0
     for item in (qcc_cfg.get("watch_companies", []) if client else []):
-        credit_code = item.get("credit_code", "")
-        name = item.get("name", credit_code)
-        if not credit_code:
+        tyc_id = item.get("tyc_id", "")
+        name = item.get("name", tyc_id)
+        if not tyc_id and not name:
             continue
         try:
-            company, persons = client.fetch_all(credit_code)
+            if tyc_id:
+                company, persons = client.fetch_by_id(tyc_id)
+            else:
+                company, persons = client.fetch_by_name(name)
             if company:
                 store.save_company({
                     "credit_code": company.credit_code,
@@ -360,6 +363,7 @@ def run_qcc(cfg, store):
                     "raw_json": company.raw_json,
                 })
                 total_companies += 1
+            credit_code = company.credit_code if company else (tyc_id or name)
             for p in persons:
                 if not p.name:
                     continue
@@ -369,12 +373,12 @@ def run_qcc(cfg, store):
                     share_ratio=p.share_ratio, invest_amount=p.invest_amount,
                 )
                 total_persons += 1
-            print(f"[qcc] {name}：法人={company.legal_rep if company else '?'}，"
+            print(f"[tyc] {name}：法人={company.legal_rep if company else '?'}，"
                   f"人员 {len(persons)} 条")
         except Exception as e:
-            print(f"[qcc] {name} 抓取失败: {e}")
+            print(f"[tyc] {name or tyc_id} 抓取失败: {e}")
 
-    print(f"[qcc] 完成，企业 {total_companies} 家，人员 {total_persons} 条入库")
+    print(f"[tyc] 完成，企业 {total_companies} 家，人员 {total_persons} 条入库")
 
     # ── 上市公司路：东方财富免费接口 ──
     listed = qcc_cfg.get("listed_companies", [])

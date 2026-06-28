@@ -1,23 +1,19 @@
-"""企查查数据抓取层：通过官方开放平台 API 拉取企业工商信息与人员数据。
+"""企业工商数据抓取层：天眼查开放平台 API + 东方财富上市公司接口。
 
 环境变量：
-    QCC_API_KEY    企查查开放平台 AppKey
-    QCC_SECRET_KEY 企查查开放平台 SecretKey（用于生成签名）
+    TYC_TOKEN      天眼查开放平台 Token（在开放平台控制台获取）
 
-API 文档：https://openapi.qcc.com/
+天眼查 API 文档：https://open.tianyancha.com/
 """
 from __future__ import annotations
 
-import hashlib
 import os
-import time
-import datetime as dt
-from dataclasses import dataclass, field
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import Optional
 
 import requests
 
-QCC_BASE = "https://api.qichacha.com"
+TYC_BASE = "https://open.tianyancha.com/services/open"
 
 
 @dataclass
@@ -45,182 +41,165 @@ class PersonInfo:
     invest_amount: str = ""   # 投资金额
 
 
-class QccClientError(Exception):
+class TycClientError(Exception):
     pass
 
+# 向后兼容旧名称
+QccClientError = TycClientError
 
-class QccClient:
-    """企查查开放平台客户端。"""
 
-    def __init__(self, api_key: str, secret_key: str):
-        if not api_key or not secret_key:
-            raise QccClientError("企查查 API 需要 QCC_API_KEY 和 QCC_SECRET_KEY，请检查环境变量")
-        self.api_key = api_key
-        self.secret_key = secret_key
+class TyanchaClient:
+    """天眼查开放平台客户端。
+
+    认证：Header 中传 Authorization: token <TYC_TOKEN>
+    API 版本：2.0
+    """
+
+    def __init__(self, token: str):
+        if not token:
+            raise TycClientError("天眼查 API 需要 TYC_TOKEN，请检查环境变量")
         self.session = requests.Session()
-        self.session.headers.update({"Content-Type": "application/json"})
-
-    def _sign(self, timespan: str) -> str:
-        """MD5(AppKey + timespan + SecretKey)，全小写。"""
-        raw = self.api_key + timespan + self.secret_key
-        return hashlib.md5(raw.encode("utf-8")).hexdigest().lower()
+        self.session.headers.update({
+            "Authorization": f"token {token}",
+            "Content-Type": "application/json",
+        })
 
     def _get(self, path: str, params: dict) -> dict:
-        timespan = str(int(time.time()))
-        headers = {
-            "Token": self._sign(timespan),
-            "Timespan": timespan,
-        }
-        url = QCC_BASE + path
-        resp = self.session.get(url, params={"key": self.api_key, **params},
-                                headers=headers, timeout=15)
+        resp = self.session.get(f"{TYC_BASE}{path}", params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-        if str(data.get("Status", "")) not in ("200", "true", "True"):
-            msg = data.get("Message") or data.get("Reason") or str(data)
-            raise QccClientError(f"企查查 API 错误: {msg}")
+        if data.get("state") != "ok":
+            msg = data.get("message") or data.get("reason") or str(data)
+            raise TycClientError(f"天眼查 API 错误: {msg}")
         return data
 
     # ── 企业搜索 ──────────────────────────────────────────────────────────
 
     def search_company(self, keyword: str, page: int = 1) -> list[dict]:
-        """按关键词搜索企业，返回简要列表（name, credit_code, legal_rep 等）。"""
-        data = self._get("/ECIV4/GetBasicDetailsByName", {
-            "searchKey": keyword,
-            "pageIndex": page,
-            "pageSize": 10,
-        })
-        items = data.get("Data", {}).get("Result", []) or []
+        """按关键词搜索企业，返回简要列表。"""
+        data = self._get("/search/2.0", {"word": keyword, "pageSize": 10, "pageNum": page})
+        items = data.get("data", {}).get("items", []) or []
         return [
             {
-                "credit_code": item.get("CreditCode", ""),
-                "name": item.get("Name", ""),
-                "legal_rep": item.get("OperName", ""),
-                "status": item.get("Status", ""),
-                "established": item.get("StartDate", ""),
-                "reg_capital": item.get("RegistCapi", ""),
+                "id": str(item.get("id", "")),
+                "credit_code": item.get("creditCode", ""),
+                "name": item.get("name", ""),
+                "legal_rep": item.get("legalPersonName", ""),
+                "status": item.get("regStatus", ""),
+                "established": item.get("estiblishTime", "")[:10] if item.get("estiblishTime") else "",
+                "reg_capital": item.get("regCapital", ""),
             }
             for item in items
         ]
 
     # ── 企业详情 ──────────────────────────────────────────────────────────
 
-    def get_company_detail(self, credit_code: str) -> Optional[CompanyInfo]:
-        """按统一社会信用代码拉取企业详情。"""
-        import json
-        data = self._get("/ECIV4/GetBasicDetailsByCreditCode", {
-            "creditCode": credit_code,
-        })
-        item = data.get("Data", {})
+    def get_company_detail(self, company_id: str) -> Optional[CompanyInfo]:
+        """按天眼查内部 ID 拉取企业详情。"""
+        import json as _json
+        data = self._get("/companyinfo/base/2.0", {"id": company_id})
+        item = data.get("data") or {}
         if not item:
             return None
         return CompanyInfo(
-            credit_code=item.get("CreditCode", credit_code),
-            name=item.get("Name", ""),
-            legal_rep=item.get("OperName", ""),
-            reg_capital=item.get("RegistCapi", ""),
-            established=item.get("StartDate", ""),
-            status=item.get("Status", ""),
-            industry=item.get("Industry", ""),
-            address=item.get("Address", ""),
-            phone=item.get("ContactInfo", {}).get("Tel", "") if isinstance(item.get("ContactInfo"), dict) else "",
-            email=item.get("ContactInfo", {}).get("Email", "") if isinstance(item.get("ContactInfo"), dict) else "",
-            scope=item.get("Scope", ""),
-            raw_json=json.dumps(item, ensure_ascii=False)[:5000],
+            credit_code=item.get("creditCode", "") or f"tyc_{company_id}",
+            name=item.get("name", ""),
+            legal_rep=item.get("legalPersonName", ""),
+            reg_capital=item.get("regCapital", ""),
+            established=(item.get("estiblishTime", "") or "")[:10],
+            status=item.get("regStatus", ""),
+            industry=item.get("industry", ""),
+            address=item.get("regLocation", ""),
+            phone=item.get("phoneNumber", ""),
+            email=item.get("email", ""),
+            scope=item.get("businessScope", "")[:500],
+            raw_json=_json.dumps(item, ensure_ascii=False)[:5000],
         )
 
     # ── 股东信息 ──────────────────────────────────────────────────────────
 
-    def get_shareholders(self, credit_code: str) -> list[PersonInfo]:
-        """拉取股东列表。"""
-        data = self._get("/ECIV4/GetShareholderInfo", {
-            "creditCode": credit_code,
-            "pageIndex": 1,
-            "pageSize": 50,
-        })
+    def get_shareholders(self, company_id: str) -> list[PersonInfo]:
+        """拉取股东列表（含持股比例、认缴金额）。"""
+        data = self._get("/companyinfo/holder/2.0",
+                         {"id": company_id, "pageNum": 1, "pageSize": 50})
         persons = []
-        for item in (data.get("Data", {}).get("Result", []) or []):
+        for item in (data.get("data", {}).get("result", []) or []):
+            name = item.get("name", "") or item.get("holderName", "")
+            if not name:
+                continue
             persons.append(PersonInfo(
-                name=item.get("StockName", ""),
+                name=name,
                 role="shareholder",
-                title="股东",
-                share_ratio=item.get("StockPercent", ""),
-                invest_amount=item.get("ShouldCapi", ""),
+                title=item.get("holderType", "股东"),
+                share_ratio=item.get("stockPercent", ""),
+                invest_amount=item.get("shouldCapi", ""),
             ))
         return persons
 
     # ── 高管信息 ──────────────────────────────────────────────────────────
 
-    def get_executives(self, credit_code: str) -> list[PersonInfo]:
-        """拉取高管/主要人员列表。"""
-        data = self._get("/ECIV4/GetStaffInfo", {
-            "creditCode": credit_code,
-            "pageIndex": 1,
-            "pageSize": 50,
-        })
+    def get_executives(self, company_id: str) -> list[PersonInfo]:
+        """拉取高管/董监高列表（含职位、任职时间）。"""
+        data = self._get("/companyinfo/staff/2.0",
+                         {"id": company_id, "pageNum": 1, "pageSize": 50})
         persons = []
-        for item in (data.get("Data", {}).get("Result", []) or []):
-            name = item.get("Name", "")
-            title = item.get("Job", "")
-            role = "legal_rep" if "法定代表人" in title else "executive"
-            persons.append(PersonInfo(
-                name=name,
-                role=role,
-                title=title,
-            ))
+        for item in (data.get("data", {}).get("result", []) or []):
+            name = item.get("name", "") or item.get("staffName", "")
+            title = item.get("staffTypeName", "") or item.get("typeJoin", "")
+            if not name:
+                continue
+            role = "legal_rep" if "法定代表人" in title or "董事长" in title else "executive"
+            persons.append(PersonInfo(name=name, role=role, title=title))
         return persons
 
     # ── 对外投资 ──────────────────────────────────────────────────────────
 
-    def get_investments(self, credit_code: str) -> list[PersonInfo]:
-        """拉取对外投资（该企业作为股东投资的其他公司）。"""
-        data = self._get("/ECIV4/GetInvestInfo", {
-            "creditCode": credit_code,
-            "pageIndex": 1,
-            "pageSize": 50,
-        })
+    def get_investments(self, company_id: str) -> list[PersonInfo]:
+        """拉取对外投资企业列表。"""
+        data = self._get("/companyinfo/invest/2.0",
+                         {"id": company_id, "pageNum": 1, "pageSize": 50})
         persons = []
-        for item in (data.get("Data", {}).get("Result", []) or []):
+        for item in (data.get("data", {}).get("result", []) or []):
+            name = item.get("name", "") or item.get("companyName", "")
+            if not name:
+                continue
             persons.append(PersonInfo(
-                name=item.get("Name", ""),
+                name=name,
                 role="investor",
-                title=f"被投企业（{item.get('FundedRatio', '')}）",
-                invest_amount=item.get("Amount", ""),
+                title=f"被投企业（{item.get('percent', '')}）",
+                invest_amount=item.get("amount", ""),
             ))
         return persons
 
-    # ── 一键拉全量 ────────────────────────────────────────────────────────
+    # ── 一键拉全量（按名称搜索 → 取第一个匹配 → 拉详情）────────────────
 
-    def fetch_all(self, credit_code: str) -> tuple[Optional[CompanyInfo], list[PersonInfo]]:
-        """拉取企业详情 + 股东 + 高管，合并返回。"""
-        company = self.get_company_detail(credit_code)
+    def fetch_by_name(self, company_name: str) -> tuple[Optional[CompanyInfo], list[PersonInfo]]:
+        """按公司名搜索后拉取完整信息。"""
+        results = self.search_company(company_name)
+        if not results:
+            raise TycClientError(f"未找到企业: {company_name}")
+        company_id = results[0]["id"]
+        return self.fetch_by_id(company_id)
+
+    def fetch_by_id(self, company_id: str) -> tuple[Optional[CompanyInfo], list[PersonInfo]]:
+        """按天眼查 ID 拉取企业详情 + 股东 + 高管。"""
+        company = self.get_company_detail(company_id)
         persons: list[PersonInfo] = []
-
-        try:
-            persons += self.get_shareholders(credit_code)
-        except QccClientError as e:
-            print(f"[qcc] 股东信息获取失败 {credit_code}: {e}")
-
-        try:
-            persons += self.get_executives(credit_code)
-        except QccClientError as e:
-            print(f"[qcc] 高管信息获取失败 {credit_code}: {e}")
-
-        # 对外投资可选，失败不阻断
-        try:
-            persons += self.get_investments(credit_code)
-        except Exception:
-            pass
-
+        for fn, label in [(self.get_executives, "高管"),
+                          (self.get_shareholders, "股东"),
+                          (self.get_investments, "对外投资")]:
+            try:
+                persons += fn(company_id)
+            except TycClientError as e:
+                print(f"[tyc] {label}获取失败 {company_id}: {e}")
         return company, persons
 
 
-def build_qcc_client(cfg: dict) -> QccClient:
-    """从配置中读取 API key 构建客户端。"""
+def build_qcc_client(cfg: dict) -> TyanchaClient:
+    """从配置中读取天眼查 Token 构建客户端。"""
     qcc_cfg = cfg.get("qcc", {})
-    api_key = qcc_cfg.get("api_key", "") or os.environ.get("QCC_API_KEY", "")
-    secret_key = qcc_cfg.get("secret_key", "") or os.environ.get("QCC_SECRET_KEY", "")
-    return QccClient(api_key, secret_key)
+    token = qcc_cfg.get("token", "") or os.environ.get("TYC_TOKEN", "")
+    return TyanchaClient(token)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

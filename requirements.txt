@@ -42,3 +42,4 @@ alphalens-reloaded==0.4.6
 cvxpy==1.9.2
 pyportfolioopt==1.6.0
 scikit-learn==1.9.0
+toraniko==1.1.1

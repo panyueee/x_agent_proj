@@ -42,6 +42,8 @@ from x_agent.qcc_fetcher import build_qcc_client, QccClientError, ListedCompanyC
 from x_agent.dune_fetcher import build_dune_client
 from x_agent.psych_analyzer import PsychAnalyzer
 from x_agent.portfolio_optimizer import run_optimizer
+from x_agent.risk_analyzer import run_risk_optimizer, compute_risk_report
+from x_agent.factor_model import run_factor_model, print_data_checklist
 
 
 def _expand_env(value):
@@ -283,6 +285,24 @@ def run_once(cfg, client, store, source, llm=None):
         result = run_optimizer(store, cfg)
         if result:
             store.save_portfolio_weights(result)
+        return
+
+    if source == "risk":
+        result = run_risk_optimizer(store, cfg)
+        if result:
+            store.save_portfolio_weights(result)
+        else:
+            # 价格不足时仍打印现有风险指标
+            report = compute_risk_report(store, cfg)
+            if report:
+                for sym, m in report.items():
+                    print(f"  {sym}: vol={m['vol_ann']:.1%} max_dd={m['max_dd']:.1%} "
+                          f"ret={m['total_ret']:.1%} ({m['n_days']}日)")
+        return
+
+    if source == "factor":
+        print_data_checklist(store, cfg)
+        run_factor_model(store, cfg)
         return
 
     # ── 常规抓取模式 ──
@@ -620,7 +640,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="X + 小红书 + 淘股吧 + 金融行情 + 产业链 + 研报 + 链上 Agent")
     parser.add_argument(
         "--source",
-        choices=["x", "xhs", "tgb", "finance", "industry", "research", "pipeline", "qcc", "dune", "psych", "portfolio", "all"],
+        choices=["x", "xhs", "tgb", "finance", "industry", "research", "pipeline",
+                 "qcc", "dune", "psych", "portfolio", "risk", "factor", "all"],
         default="all",
         help="数据来源（默认 all）",
     )

@@ -163,6 +163,15 @@ CREATE TABLE IF NOT EXISTS north_flow(
   fetched_at   TEXT
 );
 
+CREATE TABLE IF NOT EXISTS concept_mappings(
+  concept      TEXT PRIMARY KEY,   -- 概念板块名称（东方财富）
+  gics         TEXT,               -- 映射到的 GICS 大类
+  source       TEXT DEFAULT 'auto', -- seed / auto / llm / manual
+  confirmed    INTEGER DEFAULT 0,  -- 1=人工确认，0=待确认
+  updated_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_concept_gics ON concept_mappings(gics);
+
 CREATE TABLE IF NOT EXISTS portfolio_weights(
   id           TEXT PRIMARY KEY,   -- hash(computed_at)
   computed_at  TEXT,
@@ -639,6 +648,42 @@ class Store:
             "FROM company_persons WHERE credit_code=? ORDER BY role, name",
             (credit_code,),
         ).fetchall()
+
+    # ── 概念板块映射 ──
+
+    def save_concept_mapping(self, concept: str, gics: str,
+                              source: str = "auto", confirmed: int = 0) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO concept_mappings "
+            "(concept, gics, source, confirmed, updated_at) VALUES (?,?,?,?,?)",
+            (concept, gics, source, confirmed, dt.datetime.utcnow().isoformat()),
+        )
+        self.conn.commit()
+
+    def load_concept_mappings(self) -> dict[str, str]:
+        """返回 {concept: gics}，包含所有已入库的映射。"""
+        rows = self.conn.execute(
+            "SELECT concept, gics FROM concept_mappings"
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def unconfirmed_concepts(self) -> list[dict]:
+        """返回待人工确认的概念列表。"""
+        rows = self.conn.execute(
+            "SELECT concept, gics, source, updated_at FROM concept_mappings "
+            "WHERE confirmed=0 ORDER BY updated_at DESC"
+        ).fetchall()
+        return [{"concept": r[0], "gics": r[1], "source": r[2], "updated_at": r[3]}
+                for r in rows]
+
+    def confirm_concept(self, concept: str, gics: str) -> None:
+        """人工确认并更正某个概念的映射。"""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO concept_mappings "
+            "(concept, gics, source, confirmed, updated_at) VALUES (?,?,'manual',1,?)",
+            (concept, gics, dt.datetime.utcnow().isoformat()),
+        )
+        self.conn.commit()
 
     # ── 组合权重 ──
 

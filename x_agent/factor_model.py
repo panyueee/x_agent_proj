@@ -221,6 +221,24 @@ CONCEPT_TO_GICS: dict[str, str] = {
 }
 
 
+def get_concept_mappings(store=None) -> dict[str, str]:
+    """
+    返回完整概念→GICS 映射。
+    优先读 DB（每周更新），DB 为空时退化到硬编码 CONCEPT_TO_GICS。
+    """
+    if store is not None:
+        try:
+            db_map = store.load_concept_mappings()
+            if db_map:
+                # DB 映射覆盖硬编码（DB 为最新权威）
+                merged = dict(CONCEPT_TO_GICS)
+                merged.update(db_map)
+                return merged
+        except Exception:
+            pass
+    return dict(CONCEPT_TO_GICS)
+
+
 def _returns_from_store(store, symbols: list[str]) -> Optional[pd.DataFrame]:
     """从 price_bars 读取日收益率，列=symbol。"""
     frames = {}

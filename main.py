@@ -38,7 +38,7 @@ from x_agent.finance_fetcher import FinanceClient
 from x_agent.industry_fetcher import IndustryClient, IndustryNode
 from x_agent.research_fetcher import ResearchClient
 from x_agent.pipeline import run_pipeline, run_industry_step, run_research_step
-from x_agent.qcc_fetcher import build_qcc_client, QccClientError
+from x_agent.qcc_fetcher import build_qcc_client, QccClientError, ListedCompanyClient
 
 
 def _expand_env(value):
@@ -329,15 +329,15 @@ def run_qcc(cfg, store):
         print("[qcc] 未启用，跳过")
         return
 
+    client = None
     try:
         client = build_qcc_client(cfg)
     except QccClientError as e:
-        print(f"[qcc] 客户端初始化失败（{e}），跳过")
-        return
+        print(f"[qcc] 企查查客户端未配置（{e}），跳过企查查，继续抓上市公司")
 
     total_companies = 0
     total_persons = 0
-    for item in qcc_cfg.get("watch_companies", []):
+    for item in (qcc_cfg.get("watch_companies", []) if client else []):
         credit_code = item.get("credit_code", "")
         name = item.get("name", credit_code)
         if not credit_code:
@@ -375,6 +375,50 @@ def run_qcc(cfg, store):
             print(f"[qcc] {name} 抓取失败: {e}")
 
     print(f"[qcc] 完成，企业 {total_companies} 家，人员 {total_persons} 条入库")
+
+    # ── 上市公司路：东方财富免费接口 ──
+    listed = qcc_cfg.get("listed_companies", [])
+    if listed:
+        lc = ListedCompanyClient()
+        lc_companies = lc_persons = 0
+        for item in listed:
+            code = item.get("code", "")
+            name = item.get("name", code)
+            if not code:
+                continue
+            try:
+                company, persons = lc.fetch_all(code, name)
+                if company:
+                    store.save_company({
+                        "credit_code": company.credit_code,
+                        "name": company.name or name,
+                        "legal_rep": company.legal_rep,
+                        "reg_capital": company.reg_capital,
+                        "established": company.established,
+                        "status": company.status,
+                        "industry": company.industry,
+                        "address": company.address,
+                        "phone": company.phone,
+                        "email": company.email,
+                        "scope": company.scope,
+                        "raw_json": company.raw_json,
+                    })
+                    lc_companies += 1
+                credit_code = company.credit_code if company else f"listed_{code}"
+                for p in persons:
+                    if not p.name:
+                        continue
+                    store.save_company_person(
+                        credit_code=credit_code,
+                        name=p.name, role=p.role, title=p.title,
+                        share_ratio=p.share_ratio,
+                    )
+                    lc_persons += 1
+                print(f"[listed] {name}：法人={company.legal_rep if company else '?'}，"
+                      f"高管+股东 {len(persons)} 条")
+            except Exception as e:
+                print(f"[listed] {name} 抓取失败: {e}")
+        print(f"[listed] 完成，上市公司 {lc_companies} 家，人员 {lc_persons} 条入库")
 
 
 def fetch_research(cfg, _since):

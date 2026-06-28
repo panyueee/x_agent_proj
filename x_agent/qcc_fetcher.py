@@ -221,3 +221,139 @@ def build_qcc_client(cfg: dict) -> QccClient:
     api_key = qcc_cfg.get("api_key", "") or os.environ.get("QCC_API_KEY", "")
     secret_key = qcc_cfg.get("secret_key", "") or os.environ.get("QCC_SECRET_KEY", "")
     return QccClient(api_key, secret_key)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 东方财富上市公司高管/股东接口（无需 API key，免费）
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _em_secucode(stock_code: str) -> str:
+    """把 6 位股票代码转为东方财富 SECUCODE 格式，如 600519 → 600519.SH。"""
+    code = stock_code.strip()
+    if code.startswith(("6", "9")):
+        return f"{code}.SH"
+    return f"{code}.SZ"
+
+
+def _em_prefix_code(stock_code: str) -> str:
+    """把 6 位股票代码转为 SH/SZ 前缀格式，如 600519 → SH600519。"""
+    code = stock_code.strip()
+    prefix = "SH" if code.startswith(("6", "9")) else "SZ"
+    return f"{prefix}{code}"
+
+
+class ListedCompanyClient:
+    """东方财富 F10 数据客户端，抓取 A 股上市公司工商信息、十大股东、实际控制人。
+
+    使用两个稳定可用的接口：
+    - ShareholderResearch/PageAjax  → 十大流通股东 + 实际控制人
+    - CoreConception/PageAjax       → 经营范围/主营业务摘要
+    """
+
+    _BASE = "https://emweb.securities.eastmoney.com/PC_HSF10"
+    _HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Referer": "https://emweb.securities.eastmoney.com/",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+
+    def _get(self, path: str, stock_code: str) -> dict:
+        prefix_code = _em_prefix_code(stock_code)
+        resp = requests.get(f"{self._BASE}/{path}/PageAjax",
+                            params={"code": prefix_code},
+                            headers=self._HEADERS, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_shareholders_and_controller(self, stock_code: str
+                                        ) -> tuple[list[PersonInfo], list[PersonInfo]]:
+        """返回 (十大流通股东列表, 实际控制人列表)。"""
+        data = self._get("ShareholderResearch", stock_code)
+
+        # 十大流通股东
+        shareholders: list[PersonInfo] = []
+        for row in data.get("sdltgd") or []:
+            name = row.get("HOLDER_NAME", "")
+            if not name:
+                continue
+            ratio = row.get("FREE_HOLDNUM_RATIO", "")
+            shareholders.append(PersonInfo(
+                name=name,
+                role="shareholder",
+                title=row.get("HOLDER_TYPE", "股东"),
+                share_ratio=f"{ratio:.4f}%" if isinstance(ratio, float) else str(ratio),
+            ))
+
+        # 实际控制人
+        controllers: list[PersonInfo] = []
+        for row in data.get("sjkzr") or []:
+            name = row.get("HOLDER_NAME", "")
+            if not name:
+                continue
+            ratio = row.get("HOLD_RATIO") or ""
+            controllers.append(PersonInfo(
+                name=name,
+                role="legal_rep",
+                title="实际控制人",
+                share_ratio=f"{ratio}%" if ratio else "",
+            ))
+
+        return shareholders, controllers
+
+    def get_company_scope(self, stock_code: str) -> str:
+        """从 CoreConception 接口提取经营范围。"""
+        data = self._get("CoreConception", stock_code)
+        hxtc = data.get("hxtc") or []
+        for item in hxtc:
+            if item.get("KEYWORD") == "经营范围":
+                return item.get("MAINPOINT_CONTENT", "")[:500]
+        return ""
+
+    def get_company_info(self, stock_code: str, name: str = "") -> Optional[CompanyInfo]:
+        """组装 CompanyInfo（从 ShareholderResearch 和 CoreConception 拼合）。"""
+        import json as _json
+        try:
+            sh_data = self._get("ShareholderResearch", stock_code)
+        except Exception:
+            sh_data = {}
+        try:
+            scope = self.get_company_scope(stock_code)
+        except Exception:
+            scope = ""
+
+        # sjkzr 实际控制人作为"法人"展示；为空时回退到第一大股东
+        sjkzr = sh_data.get("sjkzr") or []
+        legal_rep = (sjkzr[0].get("HOLDER_NAME") or "") if sjkzr else ""
+        if not legal_rep:
+            sdltgd = sh_data.get("sdltgd") or []
+            legal_rep = sdltgd[0].get("HOLDER_NAME", "") if sdltgd else ""
+
+        return CompanyInfo(
+            credit_code=f"listed_{stock_code}",
+            name=name or stock_code,
+            legal_rep=legal_rep,
+            status="上市",
+            scope=scope,
+            raw_json=_json.dumps({"sjkzr": sjkzr}, ensure_ascii=False)[:2000],
+        )
+
+    def fetch_all(self, stock_code: str, name: str = ""
+                  ) -> tuple[Optional[CompanyInfo], list[PersonInfo]]:
+        """拉取公司信息 + 十大股东 + 实际控制人，合并返回。"""
+        company = None
+        persons: list[PersonInfo] = []
+
+        try:
+            company = self.get_company_info(stock_code, name)
+        except Exception as e:
+            print(f"[listed] 公司信息获取失败 {stock_code}: {e}")
+
+        try:
+            shareholders, controllers = self.get_shareholders_and_controller(stock_code)
+            persons += controllers + shareholders
+        except Exception as e:
+            print(f"[listed] 股东/控制人获取失败 {stock_code}: {e}")
+
+        return company, persons

@@ -38,7 +38,7 @@ def _apple_vision_ocr(image_path: str) -> str:
 
 
 def _run_xhs(*args) -> dict:
-    result = subprocess.run(["xhs", *args], capture_output=True, text=True)
+    result = subprocess.run(["xhs", *args, "--yaml"], capture_output=True, text=True)
     try:
         return yaml.safe_load(result.stdout) or {}
     except Exception:
@@ -162,16 +162,13 @@ class XhsClient:
             note_id = item.get("id") or ""
             if not note_id or "#" in note_id:   # 跳过广告占位
                 continue
-            # 用线程池给 _read_note 加 15s 超时，防止 CLI 挂住
-            try:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(_read_note, note_id)
-                    card = future.result(timeout=15)
-            except concurrent.futures.TimeoutError:
-                print(f"[xhs] _read_note({note_id}) 超时，跳过")
-                continue
+            # 直接用搜索结果里的 note_card，避免逐条调 xhs read（慢 10x）
+            card = dict(item.get("note_card") or {})
             if not card:
                 continue
+            # 搜索结果用 display_title 而非 title，统一映射
+            if not card.get("title") and card.get("display_title"):
+                card["title"] = card["display_title"]
             tw = _card_to_tweet(note_id, card, label)
             if tw.created_at and tw.created_at < since_str:
                 continue

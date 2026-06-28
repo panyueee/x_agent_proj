@@ -377,6 +377,21 @@ research:
         - name: 弗迪电池
           code: ""
 
+qcc:
+  enabled: true
+  api_key: ${QCC_API_KEY}
+  secret_key: ${QCC_SECRET_KEY}
+  # 重点关注的企业（填统一社会信用代码）
+  watch_companies:
+    - credit_code: "91310000677833975Y"
+      name: 宁德时代新能源科技股份有限公司
+    - credit_code: "914403001922038216"
+      name: 比亚迪股份有限公司
+    - credit_code: "91310115MA1K5FLX0Y"
+      name: 海光信息技术股份有限公司
+  # 关键人员追踪（按姓名搜索其关联企业）
+  watch_persons: []   # 如：- name: 曾毓群
+
 pipeline:
   enabled: true
   digest_path: ./pipeline_digest.md

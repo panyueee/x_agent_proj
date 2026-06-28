@@ -38,6 +38,7 @@ from x_agent.finance_fetcher import FinanceClient
 from x_agent.industry_fetcher import IndustryClient, IndustryNode
 from x_agent.research_fetcher import ResearchClient
 from x_agent.pipeline import run_pipeline, run_industry_step, run_research_step
+from x_agent.qcc_fetcher import build_qcc_client, QccClientError
 
 
 def _expand_env(value):
@@ -220,6 +221,10 @@ def run_once(cfg, client, store, source, llm=None):
         print(f"[research] 保存研报 {len(reports)} 篇")
         return
 
+    if source == "qcc":
+        run_qcc(cfg, store)
+        return
+
     # ── 常规抓取模式 ──
     since = dt.datetime.utcnow() - dt.timedelta(hours=cfg["fetch"]["lookback_hours"])
     collected = []
@@ -260,12 +265,13 @@ def run_once(cfg, client, store, source, llm=None):
 
     _save_tweets(collected, store, cfg, llm)
 
-    # all 模式：X 抓完后顺便扫描联动触发
+    # all 模式：X 抓完后顺便扫描联动触发，并跑企查查
     if source == "all":
         from x_agent.pipeline import scan_x_for_triggers
         n = scan_x_for_triggers(store, cfg)
         if n:
             print(f"[pipeline] 检测到 {n} 条新触发，运行 `--source pipeline` 可深挖")
+        run_qcc(cfg, store)
 
 
 def _save_tweets(collected, store, cfg, llm):
@@ -316,6 +322,61 @@ def fetch_industry(cfg, _since):
     return nodes
 
 
+def run_qcc(cfg, store):
+    """拉取企查查企业工商信息与人员数据并入库。"""
+    qcc_cfg = cfg.get("qcc", {})
+    if not qcc_cfg.get("enabled"):
+        print("[qcc] 未启用，跳过")
+        return
+
+    try:
+        client = build_qcc_client(cfg)
+    except QccClientError as e:
+        print(f"[qcc] 客户端初始化失败（{e}），跳过")
+        return
+
+    total_companies = 0
+    total_persons = 0
+    for item in qcc_cfg.get("watch_companies", []):
+        credit_code = item.get("credit_code", "")
+        name = item.get("name", credit_code)
+        if not credit_code:
+            continue
+        try:
+            company, persons = client.fetch_all(credit_code)
+            if company:
+                store.save_company({
+                    "credit_code": company.credit_code,
+                    "name": company.name or name,
+                    "legal_rep": company.legal_rep,
+                    "reg_capital": company.reg_capital,
+                    "established": company.established,
+                    "status": company.status,
+                    "industry": company.industry,
+                    "address": company.address,
+                    "phone": company.phone,
+                    "email": company.email,
+                    "scope": company.scope,
+                    "raw_json": company.raw_json,
+                })
+                total_companies += 1
+            for p in persons:
+                if not p.name:
+                    continue
+                store.save_company_person(
+                    credit_code=credit_code,
+                    name=p.name, role=p.role, title=p.title,
+                    share_ratio=p.share_ratio, invest_amount=p.invest_amount,
+                )
+                total_persons += 1
+            print(f"[qcc] {name}：法人={company.legal_rep if company else '?'}，"
+                  f"人员 {len(persons)} 条")
+        except Exception as e:
+            print(f"[qcc] {name} 抓取失败: {e}")
+
+    print(f"[qcc] 完成，企业 {total_companies} 家，人员 {total_persons} 条入库")
+
+
 def fetch_research(cfg, _since):
     """跑研报跟进：拉取 config 里 watch_stocks 的研报和供应商动态。"""
     research_cfg = cfg.get("research", {})
@@ -341,7 +402,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="X + 小红书 + 淘股吧 + 金融行情 + 产业链 + 研报 Agent")
     parser.add_argument(
         "--source",
-        choices=["x", "xhs", "tgb", "finance", "industry", "research", "pipeline", "all"],
+        choices=["x", "xhs", "tgb", "finance", "industry", "research", "pipeline", "qcc", "all"],
         default="all",
         help="数据来源（默认 all）",
     )

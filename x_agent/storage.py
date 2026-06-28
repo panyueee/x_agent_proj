@@ -125,6 +125,38 @@ CREATE TABLE IF NOT EXISTS industry_insights(
 );
 CREATE INDEX IF NOT EXISTS idx_insights_chain  ON industry_insights(chain);
 CREATE INDEX IF NOT EXISTS idx_insights_source ON industry_insights(source);
+
+CREATE TABLE IF NOT EXISTS companies(
+  credit_code   TEXT PRIMARY KEY,   -- 统一社会信用代码
+  name          TEXT,               -- 企业名称
+  legal_rep     TEXT,               -- 法定代表人
+  reg_capital   TEXT,               -- 注册资本
+  established   TEXT,               -- 成立日期
+  status        TEXT,               -- 经营状态
+  industry      TEXT,               -- 所属行业
+  address       TEXT,
+  phone         TEXT,
+  email         TEXT,
+  scope         TEXT,               -- 经营范围
+  raw_json      TEXT,               -- 完整原始 JSON
+  fetched_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_companies_name ON companies(name);
+
+CREATE TABLE IF NOT EXISTS company_persons(
+  id            TEXT PRIMARY KEY,   -- hash(credit_code + name + role)
+  credit_code   TEXT,               -- 所属企业
+  name          TEXT,               -- 人员姓名
+  role          TEXT,               -- legal_rep / shareholder / executive / investor
+  title         TEXT,               -- 职位/头衔
+  share_ratio   TEXT DEFAULT '',    -- 持股比例（股东）
+  invest_amount TEXT DEFAULT '',    -- 投资金额
+  fetched_at    TEXT,
+  FOREIGN KEY(credit_code) REFERENCES companies(credit_code)
+);
+CREATE INDEX IF NOT EXISTS idx_persons_company ON company_persons(credit_code);
+CREATE INDEX IF NOT EXISTS idx_persons_name    ON company_persons(name);
+CREATE INDEX IF NOT EXISTS idx_persons_role    ON company_persons(role);
 """
 
 
@@ -460,6 +492,48 @@ class Store:
              "source": r[4], "confidence": r[5], "extracted_at": r[6]}
             for r in rows
         ]
+
+    # ---- 企查查企业与人员 ----
+
+    def save_company(self, company: dict) -> None:
+        """保存企业工商信息，以统一社会信用代码去重更新。"""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO companies "
+            "(credit_code, name, legal_rep, reg_capital, established, status, "
+            "industry, address, phone, email, scope, raw_json, fetched_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (company["credit_code"], company.get("name", ""),
+             company.get("legal_rep", ""), company.get("reg_capital", ""),
+             company.get("established", ""), company.get("status", ""),
+             company.get("industry", ""), company.get("address", ""),
+             company.get("phone", ""), company.get("email", ""),
+             company.get("scope", ""), company.get("raw_json", ""),
+             dt.datetime.utcnow().isoformat()),
+        )
+        self.conn.commit()
+
+    def save_company_person(self, credit_code: str, name: str, role: str,
+                             title: str = "", share_ratio: str = "",
+                             invest_amount: str = "") -> None:
+        """保存企业人员，以 credit_code+name+role 去重。"""
+        import hashlib
+        pid = hashlib.md5(f"{credit_code}|{name}|{role}".encode()).hexdigest()
+        self.conn.execute(
+            "INSERT OR REPLACE INTO company_persons "
+            "(id, credit_code, name, role, title, share_ratio, invest_amount, fetched_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (pid, credit_code, name, role, title, share_ratio, invest_amount,
+             dt.datetime.utcnow().isoformat()),
+        )
+        self.conn.commit()
+
+    def company_persons(self, credit_code: str) -> list:
+        """返回某企业所有人员信息。"""
+        return self.conn.execute(
+            "SELECT name, role, title, share_ratio, invest_amount "
+            "FROM company_persons WHERE credit_code=? ORDER BY role, name",
+            (credit_code,),
+        ).fetchall()
 
     def recent_supplier_updates(self, customer_name: str, limit: int = 20) -> list:
         """返回某核心公司的供应商动态。"""

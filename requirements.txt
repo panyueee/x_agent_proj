@@ -38,3 +38,7 @@ pyobjc-framework-Vision  # macOS 内置 OCR，替代 easyocr；torch/easyocr 暂
 # 数据源扩展
 akshare
 dune-client
+alphalens-reloaded==0.4.6
+cvxpy==1.9.2
+pyportfolioopt==1.6.0
+scikit-learn==1.9.0

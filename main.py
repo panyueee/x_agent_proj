@@ -41,6 +41,7 @@ from x_agent.pipeline import run_pipeline, run_industry_step, run_research_step
 from x_agent.qcc_fetcher import build_qcc_client, QccClientError, ListedCompanyClient
 from x_agent.dune_fetcher import build_dune_client
 from x_agent.psych_analyzer import PsychAnalyzer
+from x_agent.portfolio_optimizer import run_optimizer
 
 
 def _expand_env(value):
@@ -278,6 +279,12 @@ def run_once(cfg, client, store, source, llm=None):
         run_psych(cfg, store, llm)
         return
 
+    if source == "portfolio":
+        result = run_optimizer(store, cfg)
+        if result:
+            store.save_portfolio_weights(result)
+        return
+
     # ── 常规抓取模式 ──
     since = dt.datetime.utcnow() - dt.timedelta(hours=cfg["fetch"]["lookback_hours"])
     collected = []
@@ -338,6 +345,15 @@ def run_once(cfg, client, store, source, llm=None):
     # 市场恐慌分析（psych / all 模式）
     if source in ("psych", "all"):
         run_psych(cfg, store, llm)
+
+    # 组合权重优化（portfolio / all 模式）
+    if source in ("portfolio", "all"):
+        result = run_optimizer(store, cfg)
+        if result:
+            store.save_portfolio_weights(result)
+            top = sorted(result["weights"].items(), key=lambda x: x[1], reverse=True)[:5]
+            top_str = "  ".join(f"{s}={w:.1%}" for s, w in top if w > 0.001)
+            print(f"[portfolio] {result['method']}  TOP5: {top_str}")
 
     # 北向资金摘要输出（finance / all 模式均打印）
     if north_flow_val is not None:
@@ -604,7 +620,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="X + 小红书 + 淘股吧 + 金融行情 + 产业链 + 研报 + 链上 Agent")
     parser.add_argument(
         "--source",
-        choices=["x", "xhs", "tgb", "finance", "industry", "research", "pipeline", "qcc", "dune", "psych", "all"],
+        choices=["x", "xhs", "tgb", "finance", "industry", "research", "pipeline", "qcc", "dune", "psych", "portfolio", "all"],
         default="all",
         help="数据来源（默认 all）",
     )

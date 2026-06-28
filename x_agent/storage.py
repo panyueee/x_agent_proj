@@ -163,6 +163,15 @@ CREATE TABLE IF NOT EXISTS north_flow(
   fetched_at   TEXT
 );
 
+CREATE TABLE IF NOT EXISTS portfolio_weights(
+  id           TEXT PRIMARY KEY,   -- hash(computed_at)
+  computed_at  TEXT,
+  method       TEXT,               -- black_litterman / max_sharpe / equal_weight
+  weights      TEXT,               -- JSON {symbol: weight}
+  views        TEXT DEFAULT '{}'   -- JSON {symbol: view_return}
+);
+CREATE INDEX IF NOT EXISTS idx_portfolio_computed ON portfolio_weights(computed_at);
+
 CREATE TABLE IF NOT EXISTS panic_snapshots(
   id             TEXT PRIMARY KEY,   -- hash(computed_at)
   computed_at    TEXT,               -- ISO8601
@@ -630,6 +639,32 @@ class Store:
             "FROM company_persons WHERE credit_code=? ORDER BY role, name",
             (credit_code,),
         ).fetchall()
+
+    # ── 组合权重 ──
+
+    def save_portfolio_weights(self, result: dict) -> None:
+        import hashlib
+        now = dt.datetime.utcnow().isoformat()
+        pid = hashlib.md5(now.encode()).hexdigest()
+        self.conn.execute(
+            "INSERT OR IGNORE INTO portfolio_weights (id, computed_at, method, weights, views) VALUES (?,?,?,?,?)",
+            (pid, now, result.get("method", ""),
+             json.dumps(result.get("weights", {}), ensure_ascii=False),
+             json.dumps(result.get("views", {}),   ensure_ascii=False)),
+        )
+        self.conn.commit()
+
+    def latest_portfolio_weights(self) -> dict:
+        row = self.conn.execute(
+            "SELECT computed_at, method, weights, views FROM portfolio_weights ORDER BY computed_at DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return {}
+        return {
+            "computed_at": row[0], "method": row[1],
+            "weights": json.loads(row[2] or "{}"),
+            "views":   json.loads(row[3] or "{}"),
+        }
 
     # ── Panic Index 快照 ──
 

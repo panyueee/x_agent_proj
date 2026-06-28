@@ -34,6 +34,36 @@ def _market_section(store, market: str, title: str, limit: int = 30) -> list:
     return lines
 
 
+def _portfolio_section(store) -> list:
+    """生成组合权重建议板块。"""
+    try:
+        pw = store.latest_portfolio_weights()
+    except Exception:
+        return []
+    if not pw or not pw.get("weights"):
+        return []
+
+    weights = pw["weights"]
+    views   = pw.get("views", {})
+    method_cn = {"black_litterman": "Black-Litterman（信号加权）",
+                 "max_sharpe": "最大夏普（历史收益）",
+                 "equal_weight": "等权组合"}.get(pw["method"], pw["method"])
+    ts = pw["computed_at"][:16].replace("T", " ")
+
+    lines = ["## 📊 组合权重建议", ""]
+    lines.append(f"方法：**{method_cn}**  （{ts} UTC）")
+    lines.append("")
+    lines.append("| 品种 | 权重 | 信号观点 |")
+    lines.append("| ---- | ---: | -------- |")
+    for sym, w in sorted(weights.items(), key=lambda x: x[1], reverse=True):
+        if w < 0.001:
+            continue
+        view_str = f"{views[sym]:+.1%}" if sym in views else "—"
+        lines.append(f"| `{sym}` | {w:.1%} | {view_str} |")
+    lines.append("")
+    return lines
+
+
 def _psych_section(store) -> list:
     """生成 Panic Index 板块的 Markdown 行列表。"""
     try:
@@ -140,6 +170,9 @@ def build_digest(store, path: str) -> str:
     lines += _market_section(store, "us_stocks", "美 股")
     lines += _market_section(store, "crypto",    "加密货币")
     lines += _market_section(store, "index",     "全球指数")
+
+    # ── 组合权重板块 ──
+    lines += _portfolio_section(store)
 
     # ── 市场心理板块 ──
     lines += _psych_section(store)

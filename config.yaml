@@ -32,9 +32,9 @@ classify:
   use_llm: false
   llm_model: claude-sonnet-4-6
 storage:
-  db_path: ./x_agent.db
+  db_path: ./output/x_agent.db
 digest:
-  output_path: ./digest.md
+  output_path: ./output/digest.md
 account_groups:
   serenity_following:
   - aleabitoreddit
@@ -400,7 +400,7 @@ qcc:
 
 pipeline:
   enabled: true
-  digest_path: ./pipeline_digest.md
+  digest_path: ./output/pipeline_digest.md
   lookback_hours: 48        # 扫描最近多少小时的 X 推文找触发词
   learning:
     enabled: true

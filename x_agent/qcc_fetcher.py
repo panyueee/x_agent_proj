@@ -14,6 +14,7 @@ from typing import Optional
 import requests
 
 TYC_BASE = "https://open.tianyancha.com/services/open"
+TYC_IC_BASE = "https://open.api.tianyancha.com/services/open"  # 工商信息接口(1001)用不同子域名
 
 
 @dataclass
@@ -171,28 +172,90 @@ class TyanchaClient:
             ))
         return persons
 
-    # ── 一键拉全量（按名称搜索 → 取第一个匹配 → 拉详情）────────────────
+    # ── 工商信息接口(1001)：一次调用返回基本信息+高管+股东+对外投资 ─────
+
+    def _get_ic(self, keyword: str) -> dict:
+        """调用工商信息接口(1001)，error_code=0 表示成功。"""
+        resp = self.session.get(
+            f"{TYC_IC_BASE}/cb/ic/2.0",
+            params={"keyword": keyword},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("error_code") != 0:
+            msg = data.get("reason") or str(data)
+            raise TycClientError(f"天眼查工商信息 API 错误: {msg}")
+        return data
+
+    def get_company_ic(self, keyword: str) -> tuple[Optional[CompanyInfo], list[PersonInfo]]:
+        """工商信息接口(1001)：一次调用获取基本信息+主要人员+股东+对外投资。"""
+        import json as _json
+        data = self._get_ic(keyword)
+        item = data.get("result") or {}
+        if not item:
+            return None, []
+
+        company = CompanyInfo(
+            credit_code=item.get("creditCode", "") or item.get("taxNumber", "") or f"tyc_{item.get('id', '')}",
+            name=item.get("name", ""),
+            legal_rep=item.get("legalPersonName", ""),
+            reg_capital=item.get("regCapital", ""),
+            established=(item.get("estiblishTime", "") or "")[:10],
+            status=item.get("regStatus", ""),
+            industry=item.get("industry", ""),
+            address=item.get("regLocation", ""),
+            phone=item.get("phoneNumber", ""),
+            email=item.get("email", ""),
+            scope=(item.get("businessScope", "") or "")[:500],
+            raw_json=_json.dumps({
+                "id": item.get("id"),
+                "regNumber": item.get("regNumber"),
+                "orgNumber": item.get("orgNumber"),
+                "taxNumber": item.get("taxNumber"),
+            }, ensure_ascii=False),
+        )
+
+        persons: list[PersonInfo] = []
+        for s in item.get("staffList") or []:
+            name = s.get("name", "")
+            if not name:
+                continue
+            title = s.get("staffTypeName", "")
+            type_join = ", ".join(s.get("typeJoin") or [])
+            role = "legal_rep" if "董事长" in title or "法定代表人" in title else "executive"
+            persons.append(PersonInfo(name=name, role=role, title=type_join or title))
+        for sh in item.get("shareHolderList") or []:
+            name = sh.get("name", "")
+            if not name:
+                continue
+            capital = sh.get("capital") or []
+            percent = capital[0].get("percent", "") if capital else ""
+            amount = capital[0].get("amomon", "") if capital else ""
+            persons.append(PersonInfo(
+                name=name, role="shareholder", title="股东",
+                share_ratio=percent, invest_amount=amount,
+            ))
+        for inv in item.get("investList") or []:
+            name = inv.get("name", "")
+            if not name:
+                continue
+            persons.append(PersonInfo(
+                name=name, role="investor",
+                title=f"被投企业（{inv.get('percent', '')}）",
+                invest_amount=str(inv.get("amount", "")),
+            ))
+        return company, persons
+
+    # ── 一键拉全量 ──────────────────────────────────────────────────────
 
     def fetch_by_name(self, company_name: str) -> tuple[Optional[CompanyInfo], list[PersonInfo]]:
-        """按公司名搜索后拉取完整信息。"""
-        results = self.search_company(company_name)
-        if not results:
-            raise TycClientError(f"未找到企业: {company_name}")
-        company_id = results[0]["id"]
-        return self.fetch_by_id(company_id)
+        """按公司名调用工商信息接口(1001)拉取完整信息。"""
+        return self.get_company_ic(company_name)
 
     def fetch_by_id(self, company_id: str) -> tuple[Optional[CompanyInfo], list[PersonInfo]]:
-        """按天眼查 ID 拉取企业详情 + 股东 + 高管。"""
-        company = self.get_company_detail(company_id)
-        persons: list[PersonInfo] = []
-        for fn, label in [(self.get_executives, "高管"),
-                          (self.get_shareholders, "股东"),
-                          (self.get_investments, "对外投资")]:
-            try:
-                persons += fn(company_id)
-            except TycClientError as e:
-                print(f"[tyc] {label}获取失败 {company_id}: {e}")
-        return company, persons
+        """按天眼查内部 ID 调用工商信息接口(1001)拉取完整信息。"""
+        return self.get_company_ic(company_id)
 
 
 def build_qcc_client(cfg: dict) -> TyanchaClient:

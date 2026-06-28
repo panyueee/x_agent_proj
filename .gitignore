@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
-*.db
-digest.md
 .env
 CLAUDE.local.md
+
+# 生成的输出文件
+output/

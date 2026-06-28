@@ -39,6 +39,7 @@ from x_agent.industry_fetcher import IndustryClient, IndustryNode
 from x_agent.research_fetcher import ResearchClient
 from x_agent.pipeline import run_pipeline, run_industry_step, run_research_step
 from x_agent.qcc_fetcher import build_qcc_client, QccClientError, ListedCompanyClient
+from x_agent.dune_fetcher import build_dune_client
 
 
 def _expand_env(value):
@@ -319,6 +320,10 @@ def run_once(cfg, client, store, source, llm=None):
             print(f"[pipeline] 检测到 {n} 条新触发，运行 `--source pipeline` 可深挖")
         run_qcc(cfg, store)
 
+    # 链上聪明钱（dune / all 模式）
+    if source in ("dune", "all"):
+        run_dune(cfg, store)
+
     # 北向资金摘要输出（finance / all 模式均打印）
     if north_flow_val is not None:
         sign = "+" if north_flow_val >= 0 else ""
@@ -516,11 +521,39 @@ def _append_north_flow_to_digest(store, digest_path):
         print(f"[digest] 北向资金追加失败: {e}")
 
 
+def run_dune(cfg, store):
+    """拉取链上聪明钱/鲸鱼异动数据（Dune Analytics），存入 tweets 表。"""
+    client = build_dune_client(cfg)
+    if not client:
+        return
+    dune_cfg = cfg.get("dune", {})
+    min_sm    = float(dune_cfg.get("min_usd_smart_money", 500_000))
+    min_whale = float(dune_cfg.get("min_usd_whale", 1_000_000))
+    tweets = []
+    for fn, kwargs in [
+        (client.fetch_smart_money,  {"min_usd": min_sm}),
+        (client.fetch_whale_alerts, {"min_usd": min_whale}),
+        (client.fetch_btc_holders,  {}),
+    ]:
+        try:
+            tweets += fn(**kwargs)
+        except Exception as e:
+            print(f"[dune] 抓取失败（{fn.__name__}）: {e}")
+    saved = 0
+    for tw in tweets:
+        if store.seen(tw.id):
+            continue
+        from x_agent.classifier import Signal
+        store.save(tw, Signal(category="web3", score=5, tickers=[], extracted=""))
+        saved += 1
+    print(f"[dune] 链上数据：共 {len(tweets)} 条，新入库 {saved} 条")
+
+
 def parse_args():
-    parser = argparse.ArgumentParser(description="X + 小红书 + 淘股吧 + 金融行情 + 产业链 + 研报 Agent")
+    parser = argparse.ArgumentParser(description="X + 小红书 + 淘股吧 + 金融行情 + 产业链 + 研报 + 链上 Agent")
     parser.add_argument(
         "--source",
-        choices=["x", "xhs", "tgb", "finance", "industry", "research", "pipeline", "qcc", "all"],
+        choices=["x", "xhs", "tgb", "finance", "industry", "research", "pipeline", "qcc", "dune", "all"],
         default="all",
         help="数据来源（默认 all）",
     )

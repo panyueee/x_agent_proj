@@ -421,3 +421,8 @@ pipeline:
         - 锂价
         - 电池降价
         - 新能源补贴
+
+dune:
+  enabled: false          # 设为 true 且配置 DUNE_API_KEY 后生效
+  min_usd_smart_money: 500000   # 聪明钱过滤门槛（美元）
+  min_usd_whale: 1000000        # 鲸鱼转账过滤门槛（美元）

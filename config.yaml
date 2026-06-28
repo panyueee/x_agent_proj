@@ -276,7 +276,8 @@ xhs:
   accounts: []   # 填入要监控的小红书用户名
 tgb:
   enabled: true
-  max_per_user: 10
+  max_per_user: 0        # 0 = 全量模式，按 lookback_days 回溯
+  lookback_days: 90      # 回溯 3 个月
   max_per_stock: 10
   users:
     # 格式：id 为淘股吧用户数字 ID（URL /blog/<id> 中的数字），name 为昵称（仅供备注）
@@ -426,3 +427,10 @@ dune:
   enabled: false          # 设为 true 且配置 DUNE_API_KEY 后生效
   min_usd_smart_money: 500000   # 聪明钱过滤门槛（美元）
   min_usd_whale: 1000000        # 鲸鱼转账过滤门槛（美元）
+
+psych:
+  enabled: true
+  lookback_hours: 24      # 扫描近多少小时的入库推文
+  use_llm: false          # true 时调 Claude 生成心理解读报告（需 ANTHROPIC_API_KEY）
+  fear_threshold: 70      # Panic Index >= 此值时触发逆向买入预警
+  greed_threshold: 30     # Panic Index <= 此值时触发逆向减仓预警

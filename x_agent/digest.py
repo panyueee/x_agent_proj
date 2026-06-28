@@ -34,6 +34,72 @@ def _market_section(store, market: str, title: str, limit: int = 30) -> list:
     return lines
 
 
+def _psych_section(store) -> list:
+    """生成 Panic Index 板块的 Markdown 行列表。"""
+    try:
+        snapshots = store.recent_panic_snapshots(limit=5)
+    except Exception:
+        return []
+    if not snapshots:
+        return []
+
+    latest = snapshots[0]
+    score  = latest["panic_score"]
+    emotion_cn = {
+        "panic":   "恐慌",
+        "greed":   "贪婪",
+        "neutral": "中性",
+    }.get(latest["dominant_emotion"], latest["dominant_emotion"])
+    signal_cn = {
+        "buy":     "逆向买入预警",
+        "sell":    "逆向减仓预警",
+        "neutral": "无逆向信号",
+    }.get(latest["contrarian_signal"], latest["contrarian_signal"])
+
+    # 温度计条形
+    filled = int(score / 5)
+    bar = "█" * filled + "░" * (20 - filled)
+
+    ts = latest["computed_at"][:16].replace("T", " ")
+    lines = ["## 🧠 市场心理 / Panic Index", ""]
+    lines.append(f"**{score:.0f} / 100** `[{bar}]`  —  {emotion_cn}  ·  {signal_cn}")
+    lines.append("")
+    lines.append(
+        f"恐慌信号帖 **{latest['fear_count']}** 条 / "
+        f"贪婪信号帖 **{latest['greed_count']}** 条 / "
+        f"共扫描 {latest['total_posts']} 条  （{ts} UTC）"
+    )
+
+    llm = latest.get("llm_report") or {}
+    if llm.get("market_phase"):
+        lines.append(f"\n**市场阶段**：{llm['market_phase']}")
+    if llm.get("crowd_psychology"):
+        lines.append(f"\n> {llm['crowd_psychology']}")
+    if llm.get("key_drivers"):
+        lines.append("\n**情绪驱动因素**：" + "、".join(llm["key_drivers"]))
+    if llm.get("contrarian_rationale"):
+        lines.append(f"\n**逆向逻辑**：{llm['contrarian_rationale']}")
+    if llm.get("risk_warning"):
+        lines.append(f"\n**风险提示**：{llm['risk_warning']}")
+
+    if len(snapshots) > 1:
+        lines.append("\n**历史趋势**（最近 5 次）：")
+        lines.append("| 时间 | Panic Index | 情绪 | 信号 |")
+        lines.append("| ---- | ----------: | ---- | ---- |")
+        for s in snapshots:
+            t = s["computed_at"][:16].replace("T", " ")
+            em = {"panic": "恐慌", "greed": "贪婪", "neutral": "中性"}.get(
+                s["dominant_emotion"], s["dominant_emotion"]
+            )
+            sig = {"buy": "买入↑", "sell": "卖出↓", "neutral": "─"}.get(
+                s["contrarian_signal"], s["contrarian_signal"]
+            )
+            lines.append(f"| {t} | {s['panic_score']:.0f} | {em} | {sig} |")
+
+    lines.append("")
+    return lines
+
+
 def build_digest(store, path: str) -> str:
     rows = store.recent_signals(["strategy", "web3", "both"], limit=80)
     strat = [r for r in rows if r[4] in ("strategy", "both")]
@@ -74,6 +140,9 @@ def build_digest(store, path: str) -> str:
     lines += _market_section(store, "us_stocks", "美 股")
     lines += _market_section(store, "crypto",    "加密货币")
     lines += _market_section(store, "index",     "全球指数")
+
+    # ── 市场心理板块 ──
+    lines += _psych_section(store)
 
     out = "\n".join(lines)
     with open(path, "w", encoding="utf-8") as f:

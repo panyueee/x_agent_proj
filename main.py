@@ -40,6 +40,7 @@ from x_agent.research_fetcher import ResearchClient
 from x_agent.pipeline import run_pipeline, run_industry_step, run_research_step
 from x_agent.qcc_fetcher import build_qcc_client, QccClientError, ListedCompanyClient
 from x_agent.dune_fetcher import build_dune_client
+from x_agent.psych_analyzer import PsychAnalyzer
 
 
 def _expand_env(value):
@@ -119,6 +120,10 @@ def fetch_tgb(cfg, since):
     if not tgb_cfg.get("enabled"):
         print("[tgb] 未启用，跳过")
         return []
+    # lookback_days 覆盖全局 since（全量模式专用）
+    lookback_days = tgb_cfg.get("lookback_days")
+    if lookback_days:
+        since = dt.datetime.utcnow() - dt.timedelta(days=int(lookback_days))
     collected = []
     client = TgbClient()
     for user in tgb_cfg.get("users", []):
@@ -126,7 +131,9 @@ def fetch_tgb(cfg, since):
         if not uid:
             continue
         try:
-            collected += client.user_posts(uid, tgb_cfg.get("max_per_user", 10), since)
+            posts = client.user_posts(uid, tgb_cfg.get("max_per_user", 10), since)
+            print(f"[tgb] 用户 {uid} 帖子 {len(posts)} 篇")
+            collected += posts
         except Exception as e:
             print(f"[warn] 淘股吧用户 {uid}: {e}")
     for stock in tgb_cfg.get("stocks", []):
@@ -267,6 +274,10 @@ def run_once(cfg, client, store, source, llm=None):
         run_qcc(cfg, store)
         return
 
+    if source == "psych":
+        run_psych(cfg, store, llm)
+        return
+
     # ── 常规抓取模式 ──
     since = dt.datetime.utcnow() - dt.timedelta(hours=cfg["fetch"]["lookback_hours"])
     collected = []
@@ -323,6 +334,10 @@ def run_once(cfg, client, store, source, llm=None):
     # 链上聪明钱（dune / all 模式）
     if source in ("dune", "all"):
         run_dune(cfg, store)
+
+    # 市场恐慌分析（psych / all 模式）
+    if source in ("psych", "all"):
+        run_psych(cfg, store, llm)
 
     # 北向资金摘要输出（finance / all 模式均打印）
     if north_flow_val is not None:
@@ -549,11 +564,47 @@ def run_dune(cfg, store):
     print(f"[dune] 链上数据：共 {len(tweets)} 条，新入库 {saved} 条")
 
 
+def run_psych(cfg, store, llm=None):
+    """计算市场恐慌/贪婪指数并入库，可选 LLM 心理解读。"""
+    psych_cfg = cfg.get("psych", {})
+    if not psych_cfg.get("enabled", False):
+        return
+
+    analyzer = PsychAnalyzer(store, psych_cfg)
+    lookback = int(psych_cfg.get("lookback_hours", 24))
+    data = analyzer.compute_panic_index(lookback_hours=lookback)
+
+    if psych_cfg.get("use_llm") and llm:
+        model = cfg.get("classify", {}).get("llm_model", "claude-sonnet-4-6")
+        data  = analyzer.run_llm_synthesis(data, llm, model)
+
+    store.save_panic_snapshot(data)
+
+    score  = data["panic_score"]
+    signal = data["contrarian_signal"]
+    emotion = data["dominant_emotion"]
+    # 打印简易温度计
+    filled = int(score / 5)
+    bar = "█" * filled + "░" * (20 - filled)
+    signal_cn = {"buy": "逆向买入预警", "sell": "逆向减仓预警"}.get(signal, "无信号")
+    print(
+        f"[心理] Panic Index: {score:.0f}/100  [{bar}]  "
+        f"{emotion}  {signal_cn} | "
+        f"恐慌帖 {data['fear_count']} / 贪婪帖 {data['greed_count']} / "
+        f"总扫描 {data['total_posts']} 条"
+    )
+    llm_report = data.get("llm_report") or {}
+    if llm_report.get("crowd_psychology"):
+        print(f"[心理] {llm_report['crowd_psychology']}")
+    if llm_report.get("contrarian_rationale"):
+        print(f"[心理] 逆向逻辑: {llm_report['contrarian_rationale']}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="X + 小红书 + 淘股吧 + 金融行情 + 产业链 + 研报 + 链上 Agent")
     parser.add_argument(
         "--source",
-        choices=["x", "xhs", "tgb", "finance", "industry", "research", "pipeline", "qcc", "dune", "all"],
+        choices=["x", "xhs", "tgb", "finance", "industry", "research", "pipeline", "qcc", "dune", "psych", "all"],
         default="all",
         help="数据来源（默认 all）",
     )

@@ -163,6 +163,20 @@ CREATE TABLE IF NOT EXISTS north_flow(
   fetched_at   TEXT
 );
 
+CREATE TABLE IF NOT EXISTS panic_snapshots(
+  id             TEXT PRIMARY KEY,   -- hash(computed_at)
+  computed_at    TEXT,               -- ISO8601
+  lookback_hours INTEGER,
+  panic_score    REAL,               -- 0–100
+  fear_count     INTEGER DEFAULT 0,
+  greed_count    INTEGER DEFAULT 0,
+  total_posts    INTEGER DEFAULT 0,
+  dominant_emotion  TEXT,            -- panic / greed / neutral
+  contrarian_signal TEXT,            -- buy / sell / neutral
+  llm_report     TEXT DEFAULT ''     -- JSON 字符串（LLM 解读）
+);
+CREATE INDEX IF NOT EXISTS idx_panic_computed ON panic_snapshots(computed_at);
+
 CREATE TABLE IF NOT EXISTS company_persons(
   id            TEXT PRIMARY KEY,   -- hash(credit_code + name + role)
   credit_code   TEXT,               -- 所属企业
@@ -616,6 +630,54 @@ class Store:
             "FROM company_persons WHERE credit_code=? ORDER BY role, name",
             (credit_code,),
         ).fetchall()
+
+    # ── Panic Index 快照 ──
+
+    def save_panic_snapshot(self, data: dict) -> None:
+        """保存 Panic Index 快照，以 computed_at 的 hash 去重。"""
+        import hashlib
+        pid = hashlib.md5(data["computed_at"].encode()).hexdigest()
+        self.conn.execute(
+            "INSERT OR IGNORE INTO panic_snapshots "
+            "(id, computed_at, lookback_hours, panic_score, fear_count, greed_count, "
+            "total_posts, dominant_emotion, contrarian_signal, llm_report) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                pid,
+                data["computed_at"],
+                data.get("lookback_hours", 24),
+                data.get("panic_score", 50.0),
+                data.get("fear_count", 0),
+                data.get("greed_count", 0),
+                data.get("total_posts", 0),
+                data.get("dominant_emotion", "neutral"),
+                data.get("contrarian_signal", "neutral"),
+                json.dumps(data.get("llm_report") or {}, ensure_ascii=False),
+            ),
+        )
+        self.conn.commit()
+
+    def recent_panic_snapshots(self, limit: int = 10) -> list:
+        """返回最近 N 条 Panic Index 快照，按时间倒序。"""
+        rows = self.conn.execute(
+            "SELECT computed_at, panic_score, fear_count, greed_count, total_posts, "
+            "dominant_emotion, contrarian_signal, llm_report "
+            "FROM panic_snapshots ORDER BY computed_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        results = []
+        for r in rows:
+            results.append({
+                "computed_at":       r[0],
+                "panic_score":       r[1],
+                "fear_count":        r[2],
+                "greed_count":       r[3],
+                "total_posts":       r[4],
+                "dominant_emotion":  r[5],
+                "contrarian_signal": r[6],
+                "llm_report":        json.loads(r[7] or "{}"),
+            })
+        return results
 
     def recent_supplier_updates(self, customer_name: str, limit: int = 20) -> list:
         """返回某核心公司的供应商动态。"""

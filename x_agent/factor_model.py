@@ -75,36 +75,149 @@ DATA_REQUIREMENTS = {
     },
 }
 
-# 申万一级行业 → toraniko GICS 近似映射
-SW_TO_GICS = {
+# ── 申万一级（31 个，2021 年修订版）→ toraniko GICS 11 大类映射 ──
+SW_TO_GICS: dict[str, str] = {
+    # 科技
     "计算机":     "Technology",
     "电子":       "Technology",
+    # 通信与传媒
     "通信":       "Communication Services",
     "传媒":       "Communication Services",
+    # 医疗
     "医药生物":   "Health Care",
+    "美容护理":   "Health Care",          # 2021 新增（从医药生物拆出）
+    # 金融
     "银行":       "Financials",
     "非银金融":   "Financials",
+    # 必选消费
     "食品饮料":   "Consumer Staples",
     "农林牧渔":   "Consumer Staples",
+    # 可选消费
     "纺织服饰":   "Consumer Discretionary",
     "汽车":       "Consumer Discretionary",
     "商贸零售":   "Consumer Discretionary",
     "家用电器":   "Consumer Discretionary",
+    "社会服务":   "Consumer Discretionary",  # 2021 新增（从商贸零售拆出）
+    # 工业
     "轻工制造":   "Industrials",
     "机械设备":   "Industrials",
     "国防军工":   "Industrials",
     "交通运输":   "Industrials",
     "建筑装饰":   "Industrials",
+    # 原材料
     "建筑材料":   "Materials",
     "基础化工":   "Materials",
     "钢铁":       "Materials",
     "有色金属":   "Materials",
+    # 能源
     "煤炭":       "Energy",
     "石油石化":   "Energy",
+    # 公用事业
     "电力设备":   "Utilities",
     "公用事业":   "Utilities",
+    "环保":       "Utilities",             # 2021 新增（从公用事业拆出）
+    # 房地产
     "房地产":     "Real Estate",
+    # 综合
     "综合":       "Industrials",
+}
+
+# ── 概念板块 → GICS 大类映射 ──
+# 来源：东方财富概念板块（ak.stock_board_concept_name_em），动态变化
+# 原则：按核心驱动产业归类；跨行业概念归入主导方向
+CONCEPT_TO_GICS: dict[str, str] = {
+    # ── 科技 / AI ──
+    "人工智能":       "Technology",
+    "大模型":         "Technology",
+    "AI算力":         "Technology",
+    "算力":           "Technology",
+    "ChatGPT概念":    "Technology",
+    "AIGC":           "Technology",
+    "云计算":         "Technology",
+    "大数据":         "Technology",
+    "数字经济":       "Technology",
+    "工业互联网":     "Technology",
+    "物联网":         "Technology",
+    "区块链":         "Technology",
+    "网络安全":       "Technology",
+    "信创":           "Technology",
+    "操作系统":       "Technology",
+    "数据库":         "Technology",
+    # ── 半导体 ──
+    "半导体":         "Technology",
+    "芯片":           "Technology",
+    "晶圆代工":       "Technology",
+    "存储芯片":       "Technology",
+    "第三代半导体":   "Technology",
+    "碳化硅":         "Technology",
+    "IGBT":           "Technology",
+    "国产替代":       "Technology",
+    # ── 机器人 / 硬件 ──
+    "人形机器人":     "Industrials",
+    "工业机器人":     "Industrials",
+    "无人机":         "Industrials",
+    "低空经济":       "Industrials",
+    "航空发动机":     "Industrials",
+    # ── 新能源 ──
+    "新能源":         "Utilities",
+    "光伏":           "Utilities",
+    "风电":           "Utilities",
+    "储能":           "Utilities",
+    "氢能源":         "Utilities",
+    "核电":           "Utilities",
+    "分布式能源":     "Utilities",
+    # ── 新能源汽车 ──
+    "新能源汽车":     "Consumer Discretionary",
+    "锂电池":         "Materials",
+    "固态电池":       "Materials",
+    "碳酸锂":         "Materials",
+    "磷酸铁锂":       "Materials",
+    "钠离子电池":     "Materials",
+    "电池回收":       "Materials",
+    # ── 医药 / 医疗 ──
+    "创新药":         "Health Care",
+    "CXO":            "Health Care",
+    "医疗器械":       "Health Care",
+    "AI制药":         "Health Care",
+    "基因测序":       "Health Care",
+    "医美":           "Health Care",
+    "减肥药":         "Health Care",
+    "肿瘤免疫":       "Health Care",
+    # ── 消费 ──
+    "白酒":           "Consumer Staples",
+    "消费复苏":       "Consumer Staples",
+    "免税":           "Consumer Discretionary",
+    "宠物经济":       "Consumer Discretionary",
+    "跨境电商":       "Consumer Discretionary",
+    # ── 金融 ──
+    "券商":           "Financials",
+    "保险":           "Financials",
+    "银行":           "Financials",
+    "REITs":          "Real Estate",
+    # ── 周期 / 资源 ──
+    "黄金":           "Materials",
+    "铜":             "Materials",
+    "稀土":           "Materials",
+    "钨":             "Materials",
+    "锰":             "Materials",
+    "钼":             "Materials",
+    # ── 政策主题 ──
+    "央企改革":       "Industrials",
+    "国企改革":       "Industrials",
+    "一带一路":       "Industrials",
+    "军民融合":       "Industrials",
+    "乡村振兴":       "Consumer Staples",
+    "碳中和":         "Utilities",
+    "碳达峰":         "Utilities",
+    # ── 通信 ──
+    "卫星通信":       "Communication Services",
+    "北斗导航":       "Communication Services",
+    "5G":             "Communication Services",
+    "6G":             "Communication Services",
+    # ── 其他 ──
+    "港股通":         "Others",
+    "沪深300":        "Others",
+    "中证500":        "Others",
 }
 
 

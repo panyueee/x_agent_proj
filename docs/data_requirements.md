@@ -125,20 +125,36 @@ info = ak.stock_individual_info_em(symbol="600519")
 | 600519 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 0 |
 | 300750 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 |
 
-- **申万→GICS 映射**（已在 `x_agent/factor_model.py` 的 `SW_TO_GICS` 实现）：
+- **申万→GICS 映射**（已在 `x_agent/factor_model.py` 的 `SW_TO_GICS` 实现，覆盖 2021 修订版全部 31 个行业）：
 
 ```
-计算机/电子        → Technology
-通信/传媒          → Communication Services
-医药生物           → Health Care
-银行/非银金融      → Financials
-食品饮料/农林牧渔  → Consumer Staples
-汽车/家用电器/商贸 → Consumer Discretionary
-机械/军工/交通/建筑 → Industrials
-化工/钢铁/有色/建材 → Materials
-煤炭/石油石化      → Energy
-电力设备/公用事业  → Utilities
-房地产             → Real Estate
+计算机 / 电子                        → Technology
+通信 / 传媒                          → Communication Services
+医药生物 / 美容护理（2021新增）       → Health Care
+银行 / 非银金融                      → Financials
+食品饮料 / 农林牧渔                  → Consumer Staples
+汽车 / 家用电器 / 商贸零售 / 社会服务（2021新增） → Consumer Discretionary
+轻工制造 / 机械设备 / 军工 / 交通 / 建筑 → Industrials
+化工 / 钢铁 / 有色金属 / 建筑材料   → Materials
+煤炭 / 石油石化                      → Energy
+电力设备 / 公用事业 / 环保（2021新增）→ Utilities
+房地产                               → Real Estate
+综合                                 → Industrials
+```
+
+- **概念板块→GICS 映射**（已在 `x_agent/factor_model.py` 的 `CONCEPT_TO_GICS` 实现，覆盖 60+ 主流概念）：
+
+```
+AI算力 / 大模型 / 半导体 / 信创 / 云计算  → Technology
+人形机器人 / 低空经济 / 央企改革           → Industrials
+新能源 / 光伏 / 储能 / 碳中和             → Utilities
+锂电池 / 碳酸锂 / 固态电池 / 稀土 / 黄金 → Materials
+新能源汽车 / 免税 / 跨境电商             → Consumer Discretionary
+白酒 / 消费复苏                           → Consumer Staples
+创新药 / CXO / 医疗器械 / 医美           → Health Care
+5G / 6G / 卫星通信 / 北斗                → Communication Services
+券商 / 保险                               → Financials
+REITs                                     → Real Estate
 ```
 
 - **获取方式**：

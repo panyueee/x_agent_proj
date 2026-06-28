@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import yaml
 
 from x_agent.fetcher import build_client, XClientError
-from x_agent.classifier import classify, extract_with_llm
+from x_agent.classifier import classify, extract_with_llm, Signal
 from x_agent.storage import Store
 from x_agent.digest import build_digest
 from x_agent.xhs_fetcher import XhsClient
@@ -39,6 +39,7 @@ from x_agent.industry_fetcher import IndustryClient, IndustryNode
 from x_agent.research_fetcher import ResearchClient
 from x_agent.pipeline import run_pipeline, run_industry_step, run_research_step
 from x_agent.qcc_fetcher import build_qcc_client, QccClientError, ListedCompanyClient
+from x_agent.dune_fetcher import DuneFetcher
 
 
 def _expand_env(value):
@@ -225,6 +226,10 @@ def run_once(cfg, client, store, source, llm=None):
         run_qcc(cfg, store)
         return
 
+    if source == "dune":
+        run_dune(cfg, store)
+        return
+
     # ── 常规抓取模式 ──
     since = dt.datetime.utcnow() - dt.timedelta(hours=cfg["fetch"]["lookback_hours"])
     collected = []
@@ -265,13 +270,14 @@ def run_once(cfg, client, store, source, llm=None):
 
     _save_tweets(collected, store, cfg, llm)
 
-    # all 模式：X 抓完后顺便扫描联动触发，并跑企查查
+    # all 模式：X 抓完后顺便扫描联动触发，并跑企查查和链上数据
     if source == "all":
         from x_agent.pipeline import scan_x_for_triggers
         n = scan_x_for_triggers(store, cfg)
         if n:
             print(f"[pipeline] 检测到 {n} 条新触发，运行 `--source pipeline` 可深挖")
         run_qcc(cfg, store)
+        run_dune(cfg, store)
 
 
 def _save_tweets(collected, store, cfg, llm):
@@ -425,6 +431,64 @@ def run_qcc(cfg, store):
         print(f"[listed] 完成，上市公司 {lc_companies} 家，人员 {lc_persons} 条入库")
 
 
+def run_dune(cfg, store):
+    """拉取 Dune Analytics 链上数据（聪明钱 + 鲸鱼大额转账 + BTC 大户）并入库。
+
+    配置段：config.yaml -> dune
+    需要环境变量 DUNE_API_KEY，未配置时优雅跳过。
+    enabled: false 时直接返回，不执行任何请求。
+    """
+    dune_cfg = cfg.get("dune", {})
+    if not dune_cfg.get("enabled"):
+        print("[dune] 未启用，跳过（在 config.yaml dune.enabled 设为 true 可开启）")
+        return
+
+    # 从环境变量读取 API Key，不存在时优雅降级
+    api_key = os.environ.get("DUNE_API_KEY", "")
+    if not api_key:
+        print("[dune] 未配置 DUNE_API_KEY 环境变量，跳过链上数据抓取")
+        return
+
+    try:
+        fetcher = DuneFetcher(api_key=api_key)
+    except ImportError as e:
+        print(f"[dune] SDK 未安装（{e}），跳过")
+        return
+
+    min_usd = float(dune_cfg.get("min_usd_alert", 1_000_000))
+    collected = []
+
+    # 拉取聪明钱动向
+    try:
+        collected += fetcher.fetch_smart_money()
+    except Exception as e:
+        print(f"[dune] 聪明钱查询失败: {e}")
+
+    # 拉取鲸鱼大额转账
+    try:
+        collected += fetcher.fetch_whale_alerts(min_usd=min_usd)
+    except Exception as e:
+        print(f"[dune] 鲸鱼转账查询失败: {e}")
+
+    # 拉取 BTC 大户持仓变化
+    try:
+        collected += fetcher.fetch_btc_holders()
+    except Exception as e:
+        print(f"[dune] BTC 大户查询失败: {e}")
+
+    # 去重入库（直接存为 source='onchain' 的 tweet，跳过分类器）
+    new_count = 0
+    for tw in collected:
+        if store.seen(tw.id):
+            continue
+        # 链上数据直接用固定 signal：category=web3, score=5
+        sig = Signal(tweet_id=tw.id, category="web3", score=5, tickers=[], extracted={})
+        store.save(tw, sig)
+        new_count += 1
+
+    print(f"[dune] 链上数据入库 {new_count} 条（总 {len(collected)} 条，去重后新增 {new_count} 条）")
+
+
 def fetch_research(cfg, _since):
     """跑研报跟进：拉取 config 里 watch_stocks 的研报和供应商动态。"""
     research_cfg = cfg.get("research", {})
@@ -450,7 +514,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="X + 小红书 + 淘股吧 + 金融行情 + 产业链 + 研报 Agent")
     parser.add_argument(
         "--source",
-        choices=["x", "xhs", "tgb", "finance", "industry", "research", "pipeline", "qcc", "all"],
+        choices=["x", "xhs", "tgb", "finance", "industry", "research", "pipeline", "qcc", "dune", "all"],
         default="all",
         help="数据来源（默认 all）",
     )

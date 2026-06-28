@@ -190,6 +190,9 @@ class Store:
             source = "xiaohongshu"
         elif tweet.group_tag == "taoguba":
             source = "taoguba"
+        elif tweet.group_tag == "onchain":
+            # 链上数据来自 Dune Analytics，source 标记为 onchain
+            source = "onchain"
         else:
             source = "twitter"
         self.conn.execute(

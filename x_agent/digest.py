@@ -75,7 +75,38 @@ def build_digest(store, path: str) -> str:
     lines += _market_section(store, "crypto",    "加密货币")
     lines += _market_section(store, "index",     "全球指数")
 
+    # ---- 链上异动板块（来自 Dune Analytics，group_tag='onchain'）----
+    lines += _onchain_section(store)
+
     out = "\n".join(lines)
     with open(path, "w", encoding="utf-8") as f:
         f.write(out)
     return out
+
+
+def _onchain_section(store, limit: int = 30) -> list:
+    """生成链上异动摘要区块（聪明钱 + 鲸鱼 + BTC 大户）。
+
+    从 tweets 表中筛选 group_tag='onchain' 的最新记录，
+    按 created_at 倒序展示前 N 条。
+    """
+    try:
+        rows = store.conn.execute(
+            "SELECT author, text, url, created_at "
+            "FROM tweets WHERE group_tag='onchain' "
+            "ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    except Exception:
+        return []
+
+    if not rows:
+        return []
+
+    lines = ["## ⛓ 链上异动（Dune Analytics）", ""]
+    for author, text, url, created_at in rows:
+        ts_short = (created_at or "")[:16].replace("T", " ")
+        lines.append(f"- {text.strip()}")
+        lines.append(f"  - 来源：[{author}]({url}) · {ts_short} UTC")
+    lines.append("")
+    return lines

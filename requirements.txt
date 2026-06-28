@@ -2,6 +2,7 @@
 requests>=2.31
 PyYAML>=6.0
 anthropic>=0.40
+dune-client>=1.7       # Dune Analytics 官方 Python SDK（链上数据）
 
 # Dashboard
 fastapi>=0.100

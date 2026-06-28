@@ -398,6 +398,14 @@ qcc:
     - code: "600519"
       name: 贵州茅台
 
+dune:
+  enabled: false          # 设为 true 且配置 DUNE_API_KEY 后生效
+  queries:
+    smart_money: 2537251      # ETH 聪明钱钱包动向
+    whale_transfer: 1329533   # 大额 ETH/USDT 转账
+    btc_holders: 3324963      # BTC 大户持仓变化
+  min_usd_alert: 1000000  # 大额转账最低门槛（美元）
+
 pipeline:
   enabled: true
   digest_path: ./output/pipeline_digest.md

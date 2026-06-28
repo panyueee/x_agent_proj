@@ -18,14 +18,17 @@ SCRAPER = os.path.join(os.path.dirname(__file__), "_tgb_scraper.py")
 PYTHON3 = sys.executable   # 与主进程同一 Python/venv，确保 playwright 可用
 
 
-def _run(args):
-    r = subprocess.run(
-        [PYTHON3, SCRAPER] + args,
-        capture_output=True, text=True, timeout=60
-    )
-    if r.returncode != 0:
-        raise RuntimeError(f"scraper 异常: {r.stderr}")
-    return json.loads(r.stdout)
+def _run(args, retries=2):
+    for attempt in range(retries + 1):
+        r = subprocess.run(
+            [PYTHON3, SCRAPER] + args,
+            capture_output=True, text=True, timeout=60
+        )
+        if r.returncode == 0:
+            return json.loads(r.stdout)
+        if attempt < retries:
+            time.sleep(3)
+    raise RuntimeError(f"scraper 异常: {r.stderr}")
 
 
 def _to_tweet(art, user_id):

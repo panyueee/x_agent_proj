@@ -35,7 +35,7 @@ def _load_returns(store, symbols: list[str], min_rows: int = 60) -> pd.DataFrame
 
     prices = pd.DataFrame(frames)
     prices.index = pd.to_datetime(prices.index)
-    returns = prices.pct_change().dropna(how="all")
+    returns = prices.pct_change(fill_method=None).dropna(how="all")
     return returns
 
 
@@ -63,7 +63,7 @@ def run_risk_optimizer(store, cfg: dict, method: str = "CVaR") -> Optional[dict]
     for item in fin_cfg.get("us_stocks", []):
         symbols.append(item["symbol"])
     for item in fin_cfg.get("crypto", []):
-        symbols.append(item["symbol"].replace("/", ""))
+        symbols.append(item["symbol"])   # 保持 BTC/USDT 格式与 price_bars 一致
 
     returns = _load_returns(store, symbols, min_rows=60)
     if returns.empty or returns.shape[1] < 2:

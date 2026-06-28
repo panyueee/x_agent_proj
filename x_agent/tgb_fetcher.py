@@ -1,7 +1,8 @@
 """淘股吧数据抓取层。
 
-通过 subprocess 调用 _tgb_scraper.py（系统 python3 + playwright），
-把结果映射成 Tweet 对象，统一进入分类/存储流程。
+两种模式（通过环境变量 TGB_SCRAPER_URL 切换）：
+  远程模式：TGB_SCRAPER_URL=http://<vps>:8765  → HTTP 调用 VPS 上的常驻爬虫服务
+  本地模式：TGB_SCRAPER_URL 未设置            → subprocess 调用 _tgb_scraper.py
 """
 from __future__ import annotations
 
@@ -15,20 +16,37 @@ import time
 from .fetcher import Tweet
 
 SCRAPER = os.path.join(os.path.dirname(__file__), "_tgb_scraper.py")
-PYTHON3 = sys.executable   # 与主进程同一 Python/venv，确保 playwright 可用
+PYTHON3 = sys.executable
+CHUNK   = 20   # articles_batch 每批上限
+
+# ── 远程 HTTP 客户端 ──────────────────────────────────────────────────────
+_SCRAPER_URL = os.environ.get("TGB_SCRAPER_URL", "").rstrip("/")
+_API_KEY     = os.environ.get("TGB_API_KEY", "")
 
 
-def _run(args, retries=1, timeout=90):
-    """
-    运行 _tgb_scraper.py 子进程，超时后杀掉整个进程组（含 Chromium/Node 子进程）。
-    """
+def _remote(path: str, payload: dict, timeout: int = 150) -> any:
+    """向 VPS 爬虫服务发 POST 请求，返回解析后的 JSON。"""
+    import urllib.request
+    url  = f"{_SCRAPER_URL}{path}"
+    data = json.dumps(payload).encode()
+    req  = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json", "X-Api-Key": _API_KEY},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+# ── 本地 subprocess 客户端 ────────────────────────────────────────────────
+def _run(args: list[str], retries: int = 1, timeout: int = 90) -> any:
+    """运行本地 _tgb_scraper.py，超时后 killpg 整组。"""
     import signal
     for attempt in range(retries + 1):
         proc = subprocess.Popen(
             [PYTHON3, SCRAPER] + args,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True,
-            # 在新进程组运行，方便超时时 killpg 整组杀掉
             preexec_fn=os.setsid,
         )
         try:
@@ -50,7 +68,43 @@ def _run(args, retries=1, timeout=90):
     raise RuntimeError(f"scraper 异常: {stderr}")
 
 
-def _to_tweet(art, user_id):
+# ── 统一调度：远程优先，本地兜底 ─────────────────────────────────────────
+def _blog_since(user_id: str, since_date: str) -> list[dict]:
+    if _SCRAPER_URL:
+        return _remote("/blog_since", {"user_id": user_id, "since_date": since_date})
+    return _run(["blog_since", user_id, since_date], retries=0, timeout=120)
+
+
+def _blog(user_id: str, max_results: int) -> list[dict]:
+    if _SCRAPER_URL:
+        return _remote("/blog", {"user_id": user_id, "max_results": max_results})
+    return _run(["blog", user_id, str(max_results)], retries=0, timeout=60)
+
+
+def _articles_batch(urls: list[str]) -> list[dict]:
+    """分批处理，每批 CHUNK 篇。"""
+    arts = []
+    for i in range(0, len(urls), CHUNK):
+        chunk = urls[i:i + CHUNK]
+        try:
+            if _SCRAPER_URL:
+                chunk_arts = _remote("/articles_batch", {"urls": chunk})
+            else:
+                chunk_arts = _run(["articles_batch"] + chunk, retries=0, timeout=150)
+            arts.extend(chunk_arts)
+        except Exception as e:
+            print(f"[tgb] articles_batch 批次 {i//CHUNK+1} 失败: {e}")
+    return arts
+
+
+def _stock(stock_code: str, max_results: int) -> list[dict]:
+    if _SCRAPER_URL:
+        return _remote("/stock", {"stock_code": stock_code, "max_results": max_results})
+    return _run(["stock", stock_code, str(max_results)], retries=0, timeout=60)
+
+
+# ── 公共辅助 ─────────────────────────────────────────────────────────────
+def _to_tweet(art: dict, user_id: str) -> Tweet:
     created_at = ""
     if art.get("created_at"):
         try:
@@ -75,40 +129,30 @@ def _to_tweet(art, user_id):
     )
 
 
+# ── 主客户端 ─────────────────────────────────────────────────────────────
 class TgbClient:
     """淘股吧博客爬取客户端。"""
 
-    def user_posts(self, user_id, max_results, since):
-        """
-        max_results <= 0 时使用 blog_since 全量模式（按日期滚动到 since 为止）；
-        max_results > 0 时使用固定条数模式。
-        """
+    def __init__(self):
+        if _SCRAPER_URL:
+            print(f"[tgb] 远程模式 → {_SCRAPER_URL}")
+        else:
+            print("[tgb] 本地模式（subprocess）")
+
+    def user_posts(self, user_id: str, max_results: int, since: dt.datetime) -> list[Tweet]:
         since_str = since.strftime("%Y-%m-%d")
         if max_results <= 0:
-            # 列表页最多给 120s（滚动次数在 scraper 里已缩减）
-            links = _run(["blog_since", user_id, since_str], retries=0, timeout=120)
+            links = _blog_since(user_id, since_str)
         else:
-            links = _run(["blog", user_id, str(max_results)], retries=0, timeout=60)
+            links = _blog(user_id, max_results)
         if not links:
             return []
 
-        # 批量抓文章：一次调用拿全部详情，避免每篇单独启动浏览器
         urls = [item["url"] for item in links if item.get("url")]
-        results = []
-        try:
-            arts = _run(["articles_batch"] + urls, retries=0, timeout=120)
-        except Exception as e:
-            print(f"[tgb] 批量抓取失败，改逐篇: {e}")
-            arts = []
-            for item in links:
-                try:
-                    art = _run(["article", item["url"]], retries=0, timeout=45)
-                    if art:
-                        arts.append(art)
-                except Exception as e2:
-                    print(f"[tgb] 抓取失败 {item['url']}: {e2}")
+        arts = _articles_batch(urls)
 
         since_iso = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+        results = []
         for art in arts:
             if not art:
                 continue
@@ -118,17 +162,14 @@ class TgbClient:
             results.append(tw)
         return results
 
-    def stock_posts(self, stock_code, max_results, since):
-        """抓个股讨论页帖子，转换为 Tweet 对象列表。"""
-        links = _run(["stock", stock_code, str(max_results)], retries=0, timeout=60)
+    def stock_posts(self, stock_code: str, max_results: int, since: dt.datetime) -> list[Tweet]:
+        links = _stock(stock_code, max_results)
         if not links:
             return []
+
         urls = [item["url"] for item in links if item.get("url")]
-        try:
-            arts = _run(["articles_batch"] + urls, retries=0, timeout=120)
-        except Exception as e:
-            print(f"[tgb] 个股批量抓取失败 {stock_code}: {e}")
-            return []
+        arts = _articles_batch(urls)
+
         results = []
         for art in arts:
             if not art:

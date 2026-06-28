@@ -11,6 +11,9 @@
     --source research 只跑研报跟进（消费 pending research_trigger 事件）
     --source pipeline X + 产业链 + 研报 三步联动（先抓 X，再自动触发后续）
     --source all      六路并行（默认）
+    --source factor   因子模型（toraniko）
+    --source rag      将 DB 中文章/研报/信号批量入库 RAG 向量库
+    --source weread   抓取微信读书书单并入库 RAG（需 weread.enabled: true）
 
 环境变量：
     THIRDPARTY_API_KEY  第三方 X API
@@ -245,7 +248,142 @@ def run_akshare_extras(cfg, store):
     except Exception as e:
         print(f"[akshare] 北向资金抓取异常: {e}")
 
+    # ── 季报数据（营收 + 每股现金流，每季更新一次）──
+    try:
+        fin_cfg = cfg.get("finance", {})
+        a_symbols = [item["code"] for item in fin_cfg.get("a_shares", [])]
+        if a_symbols:
+            import calendar
+            today = dt.date.today()
+            # 季报披露月：3/4月（年报）、7/8月（半年报）、10/11月（三季报）、1月（三季报补披）
+            # 简化判断：每季末检查一次（每季第一个月首日触发，跨季时更新）
+            current_quarter_end = f"{today.year}-{(((today.month - 1) // 3) * 3 + 3):02d}-30"
+            # 用第一只股票判断是否有本季数据
+            latest = store.latest_quarterly_date(a_symbols[0])
+            if latest and latest >= current_quarter_end[:7]:
+                print(f"[akshare] 季报数据本季已入库（{latest}），跳过")
+            else:
+                print(f"[akshare] 开始抓取季报数据（{len(a_symbols)} 只A股）...")
+                records = ak_client.fetch_quarterly_financials(a_symbols)
+                if records:
+                    saved = store.save_quarterly_financials(records)
+                    print(f"[akshare] 季报数据入库 {saved} 条")
+    except Exception as e:
+        print(f"[akshare] 季报数据抓取异常: {e}")
+
+    # ── 全市场基本面快照（市值 + 市净率，每日一次）──
+    try:
+        today_str = dt.date.today().isoformat()
+        latest = store.latest_fundamentals_date()
+        if latest == today_str:
+            print(f"[akshare] fundamentals 今日已入库（{today_str}），跳过")
+        else:
+            records = ak_client.fetch_fundamentals(today_str)
+            if records:
+                saved = store.save_fundamentals_batch(records)
+                print(f"[akshare] fundamentals 入库 {saved} 条（{today_str}）")
+    except Exception as e:
+        print(f"[akshare] fundamentals 抓取异常: {e}")
+
     return north_flow_val
+
+
+def _run_rag_ingest(store, cfg):
+    """将数据库中的 tweets / 研报 / 微信读书批量入库到 RAG 向量库。"""
+    from x_agent.rag import ingest_article, collection_stats
+
+    rag_cfg = cfg.get("rag", {})
+    conn = store.conn
+    added_total = 0
+
+    # 1. 推文/信号
+    if rag_cfg.get("ingest_tweets", True):
+        try:
+            rows = conn.execute(
+                """SELECT t.id, t.author, t.text, t.url, t.created_at,
+                          s.category
+                   FROM tweets t
+                   LEFT JOIN signals s ON s.tweet_id = t.id
+                   WHERE LENGTH(t.text) > 50
+                   ORDER BY t.created_at DESC LIMIT 500"""
+            ).fetchall()
+            n_tw = 0
+            for tid, author, text, url, created, cat in rows:
+                label = f"@{author}" + (f" [{cat}]" if cat else "")
+                n_tw += ingest_article(url=url or f"tweet:{tid}",
+                                       content=text, title=label,
+                                       author=author or "", published_at=created or "",
+                                       source_type="article")
+            added_total += n_tw
+            print(f"[rag] 推文/信号 入库 {n_tw} 新块（共 {len(rows)} 条）")
+        except Exception as e:
+            print(f"[rag] 推文入库跳过: {e}")
+
+    # 2. 研报
+    if rag_cfg.get("ingest_reports", True):
+        try:
+            rows = conn.execute(
+                "SELECT report_id, title, summary, analyst, published_at FROM research_reports "
+                "WHERE summary IS NOT NULL AND LENGTH(summary) > 30 "
+                "ORDER BY published_at DESC LIMIT 200"
+            ).fetchall()
+            n_rep = 0
+            for rid, title, summary, analyst, pub in rows:
+                n_rep += ingest_article(url=f"report:{rid}", content=summary,
+                                        title=title or "", author=analyst or "",
+                                        published_at=pub or "", source_type="report")
+            added_total += n_rep
+            print(f"[rag] 研报 入库 {n_rep} 新块（共 {len(rows)} 篇）")
+        except Exception as e:
+            print(f"[rag] 研报入库跳过: {e}")
+
+    # 3. 微信读书（需要 weread.enabled: true 且配置了书单）
+    if rag_cfg.get("ingest_weread", True):
+        _run_weread_ingest(cfg, verbose=False)
+
+    after = collection_stats()
+    print(f"[rag] 入库完成：新增 {added_total} 块，总计 {after['total_chunks']} 块")
+    print(f"[rag] 数据库状态: {after['by_type']}")
+
+
+def _run_weread_ingest(cfg, verbose=True):
+    """抓取 config.yaml weread.books 列表并入库 RAG。"""
+    wr_cfg = cfg.get("weread", {})
+    if not wr_cfg.get("enabled", False):
+        if verbose:
+            print("[weread] weread.enabled=false，跳过（在 config.yaml 中设为 true 并配置 cookie）")
+        return
+
+    books = wr_cfg.get("books", [])
+    if not books:
+        if verbose:
+            print("[weread] weread.books 列表为空，跳过")
+        return
+
+    try:
+        from x_agent.weread_fetcher import WeReadClient, ingest_book_to_rag
+        client = WeReadClient(cfg=cfg)
+    except Exception as e:
+        print(f"[weread] 初始化失败: {e}")
+        return
+
+    max_ch   = wr_cfg.get("max_chapters", 999)
+    sleep_s  = wr_cfg.get("sleep_sec", 0.5)
+    total = 0
+    for b in books:
+        bid = b.get("id", "")
+        if not bid:
+            continue
+        try:
+            n = ingest_book_to_rag(bid, client,
+                                   title=b.get("title", bid),
+                                   author=b.get("author", ""),
+                                   max_chapters=max_ch)
+            total += n
+        except Exception as e:
+            print(f"[weread] 《{b.get('title', bid)}》入库失败: {e}")
+
+    print(f"[weread] 完成，共入库 {total} 块（{len(books)} 本书）")
 
 
 def run_once(cfg, client, store, source, llm=None):
@@ -302,7 +440,21 @@ def run_once(cfg, client, store, source, llm=None):
 
     if source == "factor":
         print_data_checklist(store, cfg)
-        run_factor_model(store, cfg)
+        result = run_factor_model(store, cfg)
+        if result:
+            store.save_factor_returns(result["factor_returns"])
+            print(f"[factor] 因子收益率已写入 DB（{result['n_symbols']} 只 × {result['factor_returns'].shape[0]} 天）")
+            from x_agent.digest import build_digest
+            build_digest(store, "./output/digest.md")
+            print("[factor] digest.md 已更新")
+        return
+
+    if source == "rag":
+        _run_rag_ingest(store, cfg)
+        return
+
+    if source == "weread":
+        _run_weread_ingest(cfg, verbose=True)
         return
 
     # ── 常规抓取模式 ──
@@ -641,7 +793,7 @@ def parse_args():
     parser.add_argument(
         "--source",
         choices=["x", "xhs", "tgb", "finance", "industry", "research", "pipeline",
-                 "qcc", "dune", "psych", "portfolio", "risk", "factor", "all"],
+                 "qcc", "dune", "psych", "portfolio", "risk", "factor", "rag", "weread", "all"],
         default="all",
         help="数据来源（默认 all）",
     )

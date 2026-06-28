@@ -130,6 +130,55 @@ def _psych_section(store) -> list:
     return lines
 
 
+def _factor_section(store) -> list:
+    """因子收益率摘要：最近 20 天各因子表现。"""
+    try:
+        rows = store.conn.execute(
+            "SELECT * FROM factor_returns ORDER BY date DESC LIMIT 20"
+        ).fetchall()
+        if not rows:
+            return []
+        cols = [d[0] for d in store.conn.execute(
+            "SELECT * FROM factor_returns LIMIT 0"
+        ).description]
+    except Exception:
+        return []
+
+    import json as _json
+    lines = ["## 📊 因子收益率（近 20 日）", ""]
+
+    # 表头
+    factor_cols = [c for c in cols if c != "date"]
+    header = "| 日期 | " + " | ".join(f"{c[:8]}" for c in factor_cols) + " |"
+    sep    = "| --- | " + " | ".join("---:" for _ in factor_cols) + " |"
+    lines += [header, sep]
+
+    for row in rows:
+        d = dict(zip(cols, row))
+        vals = " | ".join(
+            f"{d[c]*100:+.2f}%" if d[c] is not None else "—"
+            for c in factor_cols
+        )
+        lines.append(f"| {d['date']} | {vals} |")
+
+    # 累计收益摘要
+    try:
+        cum = store.conn.execute(
+            "SELECT " + ", ".join(f"AVG({c})" for c in factor_cols) +
+            " FROM factor_returns"
+        ).fetchone()
+        if cum:
+            lines.append("")
+            lines.append("**日均因子收益（全周期）**：")
+            parts = [f"{c[:8]}={v*100:+.3f}%" for c, v in zip(factor_cols, cum) if v is not None]
+            lines.append("  " + " | ".join(parts))
+    except Exception:
+        pass
+
+    lines.append("")
+    return lines
+
+
 def build_digest(store, path: str) -> str:
     rows = store.recent_signals(["strategy", "web3", "both"], limit=80)
     strat = [r for r in rows if r[4] in ("strategy", "both")]
@@ -170,6 +219,9 @@ def build_digest(store, path: str) -> str:
     lines += _market_section(store, "us_stocks", "美 股")
     lines += _market_section(store, "crypto",    "加密货币")
     lines += _market_section(store, "index",     "全球指数")
+
+    # ── 因子收益率板块 ──
+    lines += _factor_section(store)
 
     # ── 组合权重板块 ──
     lines += _portfolio_section(store)

@@ -14,6 +14,7 @@ import datetime as dt
 import json
 import re
 import requests
+import time
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -492,6 +493,57 @@ class AKShareClient:
             print(f"[akshare] A股 {code} 行情获取失败: {e}")
             return None
 
+    def fetch_quarterly_financials(self, symbols: list) -> list:
+        """
+        拉取 A 股季报/年报营收和每股现金流，用于计算 P/S 和 P/CF。
+        数据频率：季度（按报告期），结果按 symbol+report_date 去重存储。
+
+        返回 list[dict]，字段：
+          symbol / report_date / total_revenue / per_share_cf / fetched_at
+        """
+        ak = self._import_ak()
+        import math
+
+        def _suffix(code: str) -> str:
+            return code + (".SH" if code.startswith(("6", "9")) else ".SZ")
+
+        results = []
+        for symbol in symbols:
+            try:
+                df = ak.stock_financial_analysis_indicator_em(
+                    symbol=_suffix(symbol), indicator="按报告期"
+                )
+                if df is None or df.empty:
+                    continue
+
+                fetched_at = dt.datetime.utcnow().isoformat()
+                for _, row in df.iterrows():
+                    report_date = str(row.get("REPORT_DATE", ""))[:10]
+                    if not report_date:
+                        continue
+
+                    def _f(col):
+                        v = row.get(col)
+                        try:
+                            f = float(v)
+                            return None if (math.isnan(f) or math.isinf(f)) else f
+                        except (TypeError, ValueError):
+                            return None
+
+                    results.append({
+                        "symbol":        symbol,
+                        "report_date":   report_date,
+                        "total_revenue": _f("TOTALOPERATEREVE"),  # 营业总收入（元）
+                        "per_share_cf":  _f("FCFF_BACK"),         # 企业自由现金流（元）
+                        "fetched_at":    fetched_at,
+                    })
+                time.sleep(0.3)
+            except Exception as e:
+                print(f"[akshare] 季报 {symbol} 获取失败: {e}")
+
+        print(f"[akshare] 季报数据获取 {len(results)} 条（{len(symbols)} 只）")
+        return results
+
     def get_dragon_tiger(self, days=1):
         # type: (int) -> List[dict]
         """
@@ -537,6 +589,59 @@ class AKShareClient:
             return result
         except Exception as e:
             print(f"[akshare] 龙虎榜获取失败: {e}")
+            return []
+
+    def fetch_fundamentals(self, today: str | None = None) -> list:
+        """
+        拉取全市场 A 股基本面快照（市值 + 市净率），一次调用覆盖全部品种。
+        today: YYYY-MM-DD，默认当天。
+        返回 list[dict]，字段：symbol / date / market_cap / float_cap / pb / book_price / pe_ttm
+        约耗时 4 分钟（东方财富分页 58 页）。
+        """
+        try:
+            ak = self._import_ak()
+            import math
+            date_str = today or dt.date.today().isoformat()
+            print(f"[akshare] 拉取全市场基本面快照（{date_str}），约需 4 分钟...")
+            df = ak.stock_zh_a_spot_em()
+            if df is None or df.empty:
+                print("[akshare] fundamentals：无数据返回")
+                return []
+
+            records = []
+            for _, row in df.iterrows():
+                symbol = str(row.get("代码", "")).zfill(6)
+                if not symbol:
+                    continue
+
+                def _f(col):
+                    v = row.get(col)
+                    try:
+                        f = float(v)
+                        return None if (math.isnan(f) or math.isinf(f)) else f
+                    except (TypeError, ValueError):
+                        return None
+
+                market_cap = _f("总市值")
+                float_cap  = _f("流通市值")
+                pb         = _f("市净率")
+                pe_ttm     = _f("市盈率-动态")
+                book_price = (1.0 / pb) if (pb and pb > 0) else None
+
+                records.append({
+                    "symbol":     symbol,
+                    "date":       date_str,
+                    "market_cap": market_cap,
+                    "float_cap":  float_cap,
+                    "pb":         pb,
+                    "book_price": book_price,
+                    "pe_ttm":     pe_ttm,
+                })
+
+            print(f"[akshare] fundamentals 获取 {len(records)} 条")
+            return records
+        except Exception as e:
+            print(f"[akshare] fundamentals 获取失败: {e}")
             return []
 
     def get_north_flow(self):

@@ -195,6 +195,30 @@ CREATE TABLE IF NOT EXISTS panic_snapshots(
 );
 CREATE INDEX IF NOT EXISTS idx_panic_computed ON panic_snapshots(computed_at);
 
+CREATE TABLE IF NOT EXISTS quarterly_financials(
+  symbol        TEXT,
+  report_date   TEXT,               -- YYYY-MM-DD（季报/年报日期）
+  total_revenue REAL,               -- 营业总收入（元）
+  per_share_cf  REAL,               -- 每股经营性现金流（元/股）
+  fetched_at    TEXT,
+  PRIMARY KEY (symbol, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_qf_symbol ON quarterly_financials(symbol);
+
+CREATE TABLE IF NOT EXISTS fundamentals(
+  symbol      TEXT,
+  date        TEXT,               -- YYYY-MM-DD
+  market_cap  REAL,               -- 总市值（元）
+  float_cap   REAL,               -- 流通市值（元）
+  pb          REAL,               -- 市净率
+  book_price  REAL,               -- 1/PB（账价比）
+  pe_ttm      REAL,               -- 市盈率-动态
+  fetched_at  TEXT,
+  PRIMARY KEY (symbol, date)
+);
+CREATE INDEX IF NOT EXISTS idx_fund_symbol ON fundamentals(symbol);
+CREATE INDEX IF NOT EXISTS idx_fund_date   ON fundamentals(date);
+
 CREATE TABLE IF NOT EXISTS company_persons(
   id            TEXT PRIMARY KEY,   -- hash(credit_code + name + role)
   credit_code   TEXT,               -- 所属企业
@@ -758,6 +782,91 @@ class Store:
                 "llm_report":        json.loads(r[7] or "{}"),
             })
         return results
+
+    # ── quarterly_financials ──────────────────────────────────────────────────
+
+    def save_quarterly_financials(self, records: list) -> int:
+        """批量写入季报数据，返回写入行数。"""
+        now = dt.datetime.utcnow().isoformat()
+        rows = [
+            (r["symbol"], r["report_date"],
+             r.get("total_revenue"), r.get("per_share_cf"),
+             r.get("fetched_at", now))
+            for r in records
+        ]
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO quarterly_financials "
+            "(symbol, report_date, total_revenue, per_share_cf, fetched_at) "
+            "VALUES (?,?,?,?,?)",
+            rows,
+        )
+        self.conn.commit()
+        return len(rows)
+
+    def latest_quarterly_date(self, symbol: str) -> str | None:
+        """返回某品种最新季报日期，无数据时返回 None。"""
+        row = self.conn.execute(
+            "SELECT MAX(report_date) FROM quarterly_financials WHERE symbol=?",
+            (symbol,),
+        ).fetchone()
+        return row[0] if row else None
+
+    # ── fundamentals ──────────────────────────────────────────────────────────
+
+    def save_fundamentals_batch(self, records: list) -> int:
+        """批量写入基本面快照，返回写入行数。records 为 dict 列表。"""
+        now = dt.datetime.utcnow().isoformat()
+        rows = [
+            (
+                r["symbol"], r["date"],
+                r.get("market_cap"), r.get("float_cap"),
+                r.get("pb"), r.get("book_price"),
+                r.get("pe_ttm"), now,
+            )
+            for r in records
+        ]
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO fundamentals "
+            "(symbol, date, market_cap, float_cap, pb, book_price, pe_ttm, fetched_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        self.conn.commit()
+        return len(rows)
+
+    def latest_fundamentals_date(self) -> str | None:
+        """返回 fundamentals 表中最新的日期（YYYY-MM-DD），表为空时返回 None。"""
+        row = self.conn.execute(
+            "SELECT MAX(date) FROM fundamentals"
+        ).fetchone()
+        return row[0] if row else None
+
+    def save_factor_returns(self, factor_ret_df) -> None:
+        """将 toraniko 因子收益率 Polars DataFrame 存入 factor_returns 表。"""
+        import json as _json
+        rows = factor_ret_df.to_dicts()
+        if not rows:
+            return
+        factor_cols = [c for c in factor_ret_df.columns if c != "date"]
+        # 建表（动态列）
+        col_defs = ", ".join(f'"{c}" REAL' for c in factor_cols)
+        self.conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS factor_returns (
+                date TEXT PRIMARY KEY,
+                {col_defs}
+            )
+        """)
+        placeholders = ", ".join("?" * (1 + len(factor_cols)))
+        for row in rows:
+            date_val = str(row["date"])
+            vals = [row.get(c) for c in factor_cols]
+            col_list = ", ".join(f'"{c}"' for c in factor_cols)
+            self.conn.execute(
+                f"INSERT OR REPLACE INTO factor_returns (date, {col_list}) "
+                f"VALUES ({placeholders})",
+                [date_val] + vals,
+            )
+        self.conn.commit()
 
     def recent_supplier_updates(self, customer_name: str, limit: int = 20) -> list:
         """返回某核心公司的供应商动态。"""

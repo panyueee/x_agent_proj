@@ -94,7 +94,7 @@ def run_optimizer(store, cfg: dict) -> Optional[dict]:
     for item in fin_cfg.get("us_stocks", []):
         symbols.append(item["symbol"])
     for item in fin_cfg.get("crypto", []):
-        symbols.append(item["symbol"].replace("/", ""))
+        symbols.append(item["symbol"])   # 保持 BTC/USDT 格式与 price_bars 一致
 
     if not symbols:
         return None

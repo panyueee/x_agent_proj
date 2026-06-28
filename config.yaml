@@ -428,6 +428,27 @@ dune:
   min_usd_smart_money: 500000   # 聪明钱过滤门槛（美元）
   min_usd_whale: 1000000        # 鲸鱼转账过滤门槛（美元）
 
+weread:
+  enabled: false          # 设为 true 并设置 WEREAD_COOKIE 后生效
+  cookie: ${WEREAD_COOKIE}      # 浏览器 Cookie（登录 weread.qq.com 后复制）
+  max_chapters: 999             # 每本书最多抓取章节数（-1 为全部）
+  sleep_sec: 0.5                # 章节间休眠（秒），避免触发风控
+  books: []
+  # 示例（填写 book_id 后自动抓取并入 RAG）：
+  # books:
+  #   - id: "CB_3w2f80f60f8aa0b0b"
+  #     title: 投资中最简单的事
+  #     author: 邱国鹭
+
+rag:
+  db_path: ${RAG_DB_PATH:-./output/rag.db}   # RAG 知识库路径
+  chunk_size: 500               # 每块字符数
+  chunk_overlap: 50             # 块间重叠字符数
+  top_k: 6                      # 问答默认返回块数
+  ingest_tweets: true           # --source rag 时是否入库推文/信号
+  ingest_reports: true          # --source rag 时是否入库研报
+  ingest_weread: true           # --source rag 时是否入库微信读书（需 weread.enabled: true）
+
 psych:
   enabled: true
   lookback_hours: 24      # 扫描近多少小时的入库推文

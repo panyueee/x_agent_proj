@@ -258,108 +258,310 @@ def _returns_from_store(store, symbols: list[str]) -> Optional[pd.DataFrame]:
     return prices.pct_change().dropna(how="all")
 
 
-def check_data_readiness(store, cfg: dict) -> dict:
+ALL_SECTORS = sorted(set(SW_TO_GICS.values()))
+
+# ── 数据加载 ─────────────────────────────────────────────────────────────
+
+def _load_returns_pl(conn, symbols: list[str], min_days: int = 252) -> "pl.DataFrame":
+    """从 price_bars 读取日收益率，返回 Polars DataFrame。"""
+    import polars as pl
+    placeholders = ",".join("?" * len(symbols))
+    rows = conn.execute(
+        f"""SELECT symbol, timestamp as date, close
+            FROM price_bars
+            WHERE symbol IN ({placeholders})
+              AND market IN ('a_shares','A')
+              AND LENGTH(timestamp) = 10
+            ORDER BY symbol, date""",
+        symbols,
+    ).fetchall()
+    if not rows:
+        return pl.DataFrame()
+    df = (
+        pl.DataFrame({"symbol": [r[0] for r in rows],
+                      "date":   [r[1] for r in rows],
+                      "close":  [float(r[2]) for r in rows]})
+        .with_columns(pl.col("date").str.to_date())
+        .sort(["symbol", "date"])
+        .with_columns(
+            pl.col("close").pct_change().over("symbol").alias("asset_returns")
+        )
+        .drop_nulls("asset_returns")
+        .filter(pl.col("asset_returns").is_finite())
+    )
+    # 过滤掉交易日不足的股票
+    enough = (
+        df.group_by("symbol")
+          .agg(pl.len().alias("n"))
+          .filter(pl.col("n") >= min_days)["symbol"]
+          .to_list()
+    )
+    return df.filter(pl.col("symbol").is_in(enough)).select("date", "symbol", "asset_returns")
+
+
+def _load_mkt_cap_pl(conn, symbols: list[str]) -> "pl.DataFrame":
     """
-    检查运行 toraniko 需要的数据是否就绪。
-    返回 {data_type: {"ready": bool, "rows": int, "needed": int, "status": str}}
+    从 fundamentals 读最新一天市值，填充到所有日期（近似）。
+    fundamentals 空时退回 akshare 实时行情。
     """
-    fin_cfg = cfg.get("finance", {})
-    a_symbols = [item["code"] for item in fin_cfg.get("a_shares", [])]
+    import polars as pl
 
-    result = {}
+    rows = conn.execute(
+        "SELECT symbol, market_cap FROM fundamentals "
+        "WHERE date = (SELECT MAX(date) FROM fundamentals) AND market_cap IS NOT NULL"
+    ).fetchall()
 
-    # 1. 日收益率
-    returns = _returns_from_store(store, a_symbols)
-    if returns is not None and not returns.empty:
-        min_rows = returns.shape[0]
-        result["price_returns"] = {
-            "ready":  min_rows >= 252,
-            "rows":   min_rows,
-            "needed": 252,
-            "status": f"{'✅' if min_rows >= 252 else '❌'} {min_rows}/252 行（{len(returns.columns)} 个品种）",
-        }
-    else:
-        result["price_returns"] = {"ready": False, "rows": 0, "needed": 252,
-                                    "status": "❌ price_bars 表无数据"}
+    cap_map: dict[str, float] = {r[0]: float(r[1]) for r in rows if r[0] in set(symbols)}
 
-    # 2. 市值（检查 DB 里有没有 market_cap 字段）
+    if len(cap_map) < len(symbols) * 0.5:
+        import akshare as ak
+        spot = ak.stock_zh_a_spot_em()
+        for _, row in spot.iterrows():
+            code = str(row.get("代码", "")).zfill(6)
+            cap = row.get("总市值")
+            if code in set(symbols) and cap is not None:
+                try:
+                    cap_map[code] = float(cap)
+                except (TypeError, ValueError):
+                    pass
+
+    if not cap_map:
+        return pl.DataFrame()
+
+    # 获取所有交易日
+    syms_ok = list(cap_map.keys())
+    ph = ",".join("?" * len(syms_ok))
+    dates = [r[0] for r in conn.execute(
+        f"SELECT DISTINCT timestamp FROM price_bars WHERE symbol IN ({ph}) AND LENGTH(timestamp)=10 ORDER BY timestamp",
+        syms_ok,
+    ).fetchall()]
+
+    rows_out = [{"date": d, "symbol": s, "market_cap": cap_map[s]}
+                for s in syms_ok for d in dates]
+    return (
+        pl.DataFrame(rows_out)
+        .with_columns(pl.col("date").str.to_date())
+    )
+
+
+def _load_sector_pl(conn, symbols: list[str], dates: list) -> "pl.DataFrame":
+    """从 sw_sector_cache 读行业，构建 one-hot DataFrame。"""
+    import polars as pl
+
+    rows = conn.execute(
+        "SELECT symbol, gics_sector FROM sw_sector_cache WHERE symbol IN ({})".format(
+            ",".join("?" * len(symbols))
+        ),
+        symbols,
+    ).fetchall()
+    code_to_gics = {r[0]: r[1] for r in rows}
+
+    syms_ok = [s for s in symbols if s in code_to_gics]
+    if not syms_ok:
+        return pl.DataFrame()
+
+    records = []
+    for s in syms_ok:
+        sector = code_to_gics[s]
+        one_hot = {sec: (1.0 if sec == sector else 0.0) for sec in ALL_SECTORS}
+        for d in dates:
+            records.append({"date": d, "symbol": s, **one_hot})
+
+    return pl.DataFrame(records).with_columns(pl.col("date").cast(pl.Date))
+
+
+def _load_value_pl(conn, symbols: list[str], mkt_cap_df: "pl.DataFrame") -> "Optional[pl.DataFrame]":
+    """
+    构建 Value 因子输入：book_price（P/B倒数）+ sales_price（P/S倒数）。
+    cf_price 暂缺，跳过整个 value factor。
+    """
+    import polars as pl
+
+    # book_price = 1/pb，从 fundamentals 取最新 pb
+    bp_rows = conn.execute(
+        "SELECT symbol, book_price FROM fundamentals "
+        "WHERE date = (SELECT MAX(date) FROM fundamentals) AND book_price IS NOT NULL"
+    ).fetchall()
+    bp_map = {r[0]: float(r[1]) for r in bp_rows if r[0] in set(symbols)}
+
+    # sales_price = total_revenue / market_cap，从 quarterly_financials 取最新一期
+    qf_rows = conn.execute(
+        """SELECT qf.symbol, qf.total_revenue
+           FROM quarterly_financials qf
+           INNER JOIN (
+               SELECT symbol, MAX(report_date) as max_date
+               FROM quarterly_financials
+               WHERE symbol IN ({})
+               GROUP BY symbol
+           ) latest ON qf.symbol = latest.symbol AND qf.report_date = latest.max_date
+           WHERE qf.total_revenue IS NOT NULL""".format(",".join("?" * len(symbols))),
+        symbols,
+    ).fetchall()
+    rev_map = {r[0]: float(r[1]) for r in qf_rows}
+
+    syms_ok = [s for s in symbols if s in bp_map and s in rev_map]
+    if len(syms_ok) < 10:
+        return None
+
+    # market_cap: 取最新一天
+    cap_latest = (
+        mkt_cap_df.sort("date", descending=True)
+        .group_by("symbol").first()
+        .select("symbol", "market_cap")
+    )
+    cap_dict = dict(zip(cap_latest["symbol"].to_list(), cap_latest["market_cap"].to_list()))
+
+    dates = mkt_cap_df["date"].unique().sort().to_list()
+    records = []
+    for s in syms_ok:
+        cap = cap_dict.get(s, 1.0)
+        sp = rev_map[s] / cap if cap > 0 else None
+        if sp is None or sp <= 0:
+            continue
+        for d in dates:
+            records.append({"date": d, "symbol": s,
+                             "book_price": bp_map[s],
+                             "sales_price": sp,
+                             "cf_price": bp_map[s]})   # cf 用 book 近似
+    if not records:
+        return None
+    return pl.DataFrame(records).with_columns(pl.col("date").cast(pl.Date))
+
+
+# ── 主模型入口 ────────────────────────────────────────────────────────────
+
+def run_factor_model(store, cfg: dict, min_days: int = 252,
+                     max_symbols: int = 300) -> Optional[dict]:
+    """
+    运行 toraniko 因子模型。
+    - 从 price_bars / fundamentals / sw_sector_cache 加载数据
+    - 计算 mom + sze（有 value 数据时加 val）style factor
+    - 返回 {"factor_returns": pl.DataFrame, "residuals": pl.DataFrame, "n_symbols": int}
+    - 数据不足时返回 None
+    """
     try:
-        mc_rows = store.conn.execute(
-            "SELECT COUNT(*) FROM price_bars WHERE market_cap IS NOT NULL"
-        ).fetchone()[0]
-        result["market_cap"] = {
-            "ready":  mc_rows > 0,
-            "rows":   mc_rows,
-            "needed": len(a_symbols),
-            "status": f"{'✅' if mc_rows > 0 else '❌'} {mc_rows} 行（需新增 market_cap 列到 price_bars）",
-        }
-    except Exception:
-        result["market_cap"] = {"ready": False, "rows": 0, "needed": len(a_symbols),
-                                 "status": "❌ price_bars 表无 market_cap 列"}
-
-    # 3. 估值指标（暂无）
-    result["book_price"]  = {"ready": False, "rows": 0, "needed": len(a_symbols),
-                              "status": "❌ 未实现：需 ak.stock_individual_info_em 市净率字段"}
-    result["sales_price"] = {"ready": False, "rows": 0, "needed": len(a_symbols),
-                              "status": "❌ 未实现：需财报营收数据（ak.stock_financial_analysis_indicator）"}
-    result["cf_price"]    = {"ready": False, "rows": 0, "needed": len(a_symbols),
-                              "status": "⚠️  可暂时跳过（Value 因子只用 book_price 也能跑）"}
-
-    # 4. 行业分类（检查 industry_nodes）
-    chain_count = store.conn.execute(
-        "SELECT COUNT(DISTINCT code) FROM industry_nodes"
-    ).fetchone()[0]
-    result["sector"] = {
-        "ready":  chain_count >= len(a_symbols),
-        "rows":   chain_count,
-        "needed": len(a_symbols),
-        "status": f"{'✅' if chain_count >= len(a_symbols) else '⚠️'} industry_nodes 有 {chain_count} 个节点，"
-                  f"需要 {len(a_symbols)} 个；需添加 SW 行业列",
-    }
-
-    return result
-
-
-def run_factor_model(store, cfg: dict) -> Optional[dict]:
-    """
-    尝试运行 toraniko 因子模型，数据不足时返回 None 并打印缺失项。
-    就绪条件：price_returns ≥ 252 行 + market_cap 存在。
-    """
-    try:
-        import toraniko
-        from toraniko.styles import factor_mom
+        from toraniko.model import estimate_factor_returns
+        from toraniko.styles import factor_mom, factor_sze, factor_val
+        import polars as pl
     except ImportError:
         print("[factor] toraniko 未安装，跳过")
         return None
 
-    fin_cfg = cfg.get("finance", {})
-    a_symbols = [item["code"] for item in fin_cfg.get("a_shares", [])]
+    conn = store.conn
 
-    readiness = check_data_readiness(store, cfg)
-    pr = readiness.get("price_returns", {})
-    mc = readiness.get("market_cap", {})
-
-    if not pr.get("ready") or not mc.get("ready"):
-        print("[factor] 数据未就绪，跳过 toraniko 因子模型：")
-        for k, v in readiness.items():
-            print(f"  {k}: {v['status']}")
+    # 1. 找有足够数据的 A 股
+    rows = conn.execute(
+        """SELECT symbol, COUNT(*) as n FROM price_bars
+           WHERE market IN ('a_shares','A') AND LENGTH(timestamp)=10
+             AND (symbol LIKE '0%' OR symbol LIKE '3%' OR symbol LIKE '6%')
+           GROUP BY symbol HAVING n >= ?
+           ORDER BY n DESC LIMIT ?""",
+        (min_days, max_symbols),
+    ).fetchall()
+    symbols = [r[0] for r in rows]
+    if len(symbols) < 10:
+        print(f"[factor] 数据不足（{len(symbols)} 只），跳过")
         return None
 
-    # 数据就绪时在这里扩展实际调用 toraniko
-    # （目前数据未就绪，先返回 None）
-    return None
+    print(f"[factor] 加载 {len(symbols)} 只股票数据...")
+
+    # 2. 构建四张 Polars 表
+    returns_df = _load_returns_pl(conn, symbols, min_days)
+    if returns_df.is_empty():
+        print("[factor] returns 为空，跳过")
+        return None
+
+    mkt_cap_df = _load_mkt_cap_pl(conn, symbols)
+    if mkt_cap_df.is_empty():
+        print("[factor] market_cap 为空，跳过")
+        return None
+
+    all_dates = returns_df["date"].unique().sort().to_list()
+    sector_df = _load_sector_pl(conn, symbols, all_dates)
+    if sector_df.is_empty():
+        print("[factor] sector 数据为空（sw_sector_cache 未建立？），跳过")
+        return None
+
+    # 3. style factors
+    mom_df = factor_mom(returns_df, trailing_days=min_days,
+                        half_life=min_days // 2, lag=20).collect()
+    sze_df = factor_sze(mkt_cap_df).collect()
+    style_df = mom_df.join(sze_df, on=["date", "symbol"], how="inner").drop_nulls()
+
+    # value factor（可选，inner join 确保不引入 null 行）
+    val_df = _load_value_pl(conn, symbols, mkt_cap_df)
+    if val_df is not None:
+        val_score = factor_val(val_df).collect()
+        style_df = style_df.join(val_score, on=["date", "symbol"], how="inner")
+
+    # Polars drop_nulls 不会过滤 float NaN；必须显式过滤 NaN 行。
+    # 用 0 填充会让某列全为 0，导致截面回归矩阵奇异（SVD 不收敛）。
+    style_cols = [c for c in style_df.columns if c not in ("date", "symbol")]
+    style_df = (
+        style_df
+        .filter(pl.all_horizontal([pl.col(c).is_not_nan() for c in style_cols]))
+        .drop_nulls(style_cols)
+    )
+    print(f"[factor] style_df 有效行: {style_df.shape[0]}（过滤 NaN 后）")
+
+    # 4. 取四表交集：以 style_df 的日期为准（mom 需要足够历史，日期集最小）
+    sym_set = (
+        set(returns_df["symbol"].unique())
+        & set(mkt_cap_df["symbol"].unique())
+        & set(sector_df["symbol"].unique())
+        & set(style_df["symbol"].unique())
+    )
+    date_set = (
+        set(returns_df["date"].unique())
+        & set(style_df["date"].unique())
+    )
+
+    def _f(df):
+        filtered = df.filter(
+            pl.col("symbol").is_in(list(sym_set)) &
+            pl.col("date").is_in(list(date_set))
+        )
+        # 确保每个日期每只股票恰好一行（去重取最后一条）
+        return filtered.unique(subset=["date", "symbol"], keep="last")
+
+    print(f"[factor] 公共集: {len(sym_set)} 只 × {len(date_set)} 天")
+
+    # 每个日期至少需要有足够股票才能做截面回归
+    min_stocks_per_day = max(len(ALL_SECTORS) + len(style_cols) + 5, 20)
+    valid_dates = []
+    r_f = _f(returns_df)
+    for d in sorted(date_set):
+        n = r_f.filter(pl.col("date") == d).shape[0]
+        if n >= min_stocks_per_day:
+            valid_dates.append(d)
+    date_set = set(valid_dates)
+    print(f"[factor] 有效日期（≥{min_stocks_per_day}只）: {len(date_set)} 天")
+
+    factor_ret, residuals = estimate_factor_returns(
+        _f(returns_df), _f(mkt_cap_df), _f(sector_df), _f(style_df)
+    )
+
+    print(f"[factor] 因子收益率: {factor_ret.shape[0]} 行 × {factor_ret.shape[1]} 列")
+    return {
+        "factor_returns": factor_ret,
+        "residuals":      residuals,
+        "n_symbols":      len(sym_set),
+    }
 
 
 def print_data_checklist(store, cfg: dict) -> None:
-    """打印数据就绪状态清单，供开发者快速了解缺口。"""
-    readiness = check_data_readiness(store, cfg)
-    print("\n=== toraniko 数据就绪状态 ===")
-    for k, v in readiness.items():
-        req = DATA_REQUIREMENTS.get(k, {})
-        print(f"\n[{k}]")
-        print(f"  状态  : {v['status']}")
-        if req.get("source"):
-            print(f"  来源  : {req['source']}")
-        if req.get("note"):
-            print(f"  说明  : {req['note']}")
+    """打印数据就绪状态，方便调试。"""
+    conn = store.conn
+    pb  = conn.execute("SELECT COUNT(DISTINCT symbol), COUNT(*) FROM price_bars WHERE market IN ('a_shares','A') AND LENGTH(timestamp)=10").fetchone()
+    fd  = conn.execute("SELECT COUNT(*) FROM fundamentals").fetchone()[0]
+    qf  = conn.execute("SELECT COUNT(DISTINCT symbol) FROM quarterly_financials").fetchone()[0]
+    try:
+        sc = conn.execute("SELECT COUNT(*) FROM sw_sector_cache").fetchone()[0]
+    except Exception:
+        sc = 0
+    print(f"\n=== toraniko 数据就绪状态 ===")
+    print(f"  price_bars     : {'✅' if pb[0] > 100 else '❌'} {pb[0]} 只 / {pb[1]:,} 条")
+    print(f"  fundamentals   : {'✅' if fd > 0 else '❌'} {fd} 条（市值+PB）")
+    print(f"  quarterly_fin  : {'✅' if qf > 100 else '⚠️'} {qf} 只（营收+FCF）")
+    print(f"  sw_sector_cache: {'✅' if sc > 100 else '❌'} {sc} 只（申万行业）")
     print()

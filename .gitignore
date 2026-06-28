@@ -5,3 +5,19 @@ CLAUDE.local.md
 
 # 生成的输出文件
 output/
+
+# SQLite 数据库
+*.db
+*.db-shm
+*.db-wal
+
+# macOS / IDE
+.DS_Store
+.idea/
+
+# Claude Code 本地缓存（非项目配置）
+.claude/projects/
+.claude/worktrees/
+
+# 根目录下意外生成的 digest
+digest.md

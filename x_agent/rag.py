@@ -196,6 +196,18 @@ def ingest_pdf(
     if not p.exists():
         raise FileNotFoundError(path)
 
+    # 用文件内容 MD5 作为 source_id，文件名改变也不会重复入库
+    file_hash = hashlib.md5(p.read_bytes()).hexdigest()[:16]
+    sid = source_id or f"pdf:{file_hash}"
+
+    # 书级别预检：只要有任意一块已入库就跳过整本
+    db = _db()
+    already = db.execute(
+        "SELECT COUNT(*) FROM chunks WHERE source_id LIKE ?", (sid + "%",)
+    ).fetchone()[0]
+    if already > 0:
+        return 0
+
     reader = PdfReader(str(p))
     total_pages = len(reader.pages)
 
@@ -206,7 +218,6 @@ def ingest_pdf(
     if not author:
         author = str(pdf_meta.get("/Author", "")).strip()
 
-    sid = source_id or f"pdf:{p.name}"
     added = 0
 
     # 逐批处理：每批 pages_per_batch 页，避免将全文一次性载入内存
@@ -232,6 +243,8 @@ def ingest_pdf(
             author=author,
             extra_meta={
                 "path":        str(p.resolve()),
+                "filename":    p.name,
+                "file_hash":   file_hash,
                 "total_pages": total_pages,
                 "page_start":  batch_start + 1,
                 "page_end":    batch_end,

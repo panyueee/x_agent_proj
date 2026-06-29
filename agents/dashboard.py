@@ -333,7 +333,10 @@ def _do_ingest_file(path: Path):
     try:
         from x_agent.rag import ingest_pdf
         n = ingest_pdf(str(path))
-        _rag_log(f"✅ {path.name}  新增 {n} 块")
+        if n > 0:
+            _rag_log(f"✅ {path.name}  新增 {n} 块")
+        else:
+            _rag_log(f"⏭ {path.name}  内容已入库，跳过")
         _rag_state["stats"] = _rag_stats()
         _rag_state["status"] = "done"
     except Exception as e:

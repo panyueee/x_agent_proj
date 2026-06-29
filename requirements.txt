@@ -49,3 +49,4 @@ jieba>=0.42.1
 lancedb>=0.22.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
+pypdf>=4.0.0

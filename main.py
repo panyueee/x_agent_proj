@@ -341,6 +341,23 @@ def _run_rag_ingest(store, cfg):
     if rag_cfg.get("ingest_weread", True):
         _run_weread_ingest(cfg, verbose=False)
 
+    # 4. 本地 PDF（扫描 rag.pdf_dirs 目录）
+    if rag_cfg.get("ingest_pdfs", True):
+        from x_agent.rag import ingest_pdf_dir
+        pdf_dirs = rag_cfg.get("pdf_dirs", [])
+        recursive = rag_cfg.get("pdf_recursive", False)
+        n_pdf_ok = 0
+        for d in pdf_dirs:
+            import os
+            if not os.path.isdir(d):
+                continue
+            result = ingest_pdf_dir(d, recursive=recursive)
+            n_pdf_ok += result["ok"]
+            if result["failed"]:
+                print(f"[rag] PDF 失败 {len(result['failed'])} 本: {result['failed']}")
+        if pdf_dirs:
+            print(f"[rag] PDF 入库 {n_pdf_ok} 本（目录: {pdf_dirs}）")
+
     after = collection_stats()
     print(f"[rag] 入库完成：新增 {added_total} 块，总计 {after['total_chunks']} 块")
     print(f"[rag] 数据库状态: {after['by_type']}")

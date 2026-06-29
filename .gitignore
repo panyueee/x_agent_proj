@@ -21,3 +21,6 @@ output/
 
 # 根目录下意外生成的 digest
 digest.md
+
+# PDF 书籍（本地文件，不入库）
+books/*.pdf

@@ -171,6 +171,80 @@ def ingest_article(
     )
 
 
+def ingest_pdf(
+    path: str,
+    title: str = "",
+    author: str = "",
+    source_id: Optional[str] = None,
+) -> int:
+    """
+    解析 PDF 并入库。每页作为独立文本段落，再按 CHUNK_SIZE 分块。
+    依赖 pypdf（pip install pypdf），纯 Python，Python 3.14 兼容。
+    """
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        raise ImportError("请先安装：pip install pypdf")
+
+    from pathlib import Path as _Path
+    p = _Path(path)
+    if not p.exists():
+        raise FileNotFoundError(path)
+
+    reader = PdfReader(str(p))
+
+    # 尝试从 PDF 元数据补全标题/作者
+    meta = reader.metadata or {}
+    if not title:
+        title = str(meta.get("/Title", p.stem)).strip() or p.stem
+    if not author:
+        author = str(meta.get("/Author", "")).strip()
+
+    # 提取全文（按页拼接，保留段落分隔）
+    pages = []
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        text = text.strip()
+        if text:
+            pages.append(text)
+
+    full_text = "\n\n".join(pages)
+    if not full_text.strip():
+        return 0
+
+    sid = source_id or f"pdf:{p.name}"
+    return ingest_text(
+        text=full_text,
+        source_id=sid,
+        source_type="pdf",
+        title=title,
+        author=author,
+        extra_meta={"path": str(p.resolve()), "pages": len(reader.pages)},
+    )
+
+
+def ingest_pdf_dir(directory: str, recursive: bool = False) -> dict:
+    """
+    扫描目录下所有 PDF 并入库，返回 {"ok": n, "skipped": n, "failed": [path]} 统计。
+    """
+    from pathlib import Path as _Path
+    d = _Path(directory)
+    pattern = "**/*.pdf" if recursive else "*.pdf"
+    pdfs = sorted(d.glob(pattern))
+    ok, skipped, failed = 0, 0, []
+    for pdf in pdfs:
+        try:
+            n = ingest_pdf(str(pdf))
+            if n > 0:
+                ok += 1
+            else:
+                skipped += 1
+        except Exception as e:
+            print(f"[rag] PDF 入库失败 {pdf.name}: {e}")
+            failed.append(str(pdf))
+    return {"ok": ok, "skipped": skipped, "failed": failed}
+
+
 # ── BM25 检索 ─────────────────────────────────────────────────────────────────
 
 def _tokenize(text: str) -> list[str]:
@@ -407,6 +481,13 @@ def collection_stats() -> dict:
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
+def _get_arg(argv: list[str], flag: str, default: str = "") -> str:
+    try:
+        return argv[argv.index(flag) + 1]
+    except (ValueError, IndexError):
+        return default
+
+
 if __name__ == "__main__":
     import sys
 
@@ -417,17 +498,37 @@ if __name__ == "__main__":
 
     elif cmd == "ingest" and len(sys.argv) >= 3:
         path  = Path(sys.argv[2])
-        title = next((sys.argv[i+1] for i, a in enumerate(sys.argv) if a == "--title"), path.stem)
-        stype = next((sys.argv[i+1] for i, a in enumerate(sys.argv) if a == "--type"),  "other")
-        n = ingest_text(path.read_text(encoding="utf-8"), source_id=str(path),
-                        source_type=stype, title=title)
+        title = _get_arg(sys.argv, "--title", path.stem)
+        author = _get_arg(sys.argv, "--author", "")
+        if path.suffix.lower() == ".pdf":
+            n = ingest_pdf(str(path), title=title, author=author)
+        else:
+            stype = _get_arg(sys.argv, "--type", "other")
+            n = ingest_text(path.read_text(encoding="utf-8"), source_id=str(path),
+                            source_type=stype, title=title, author=author)
         print(f"入库完成：{n} 块")
 
+    elif cmd == "ingest-dir" and len(sys.argv) >= 3:
+        # python -m x_agent.rag ingest-dir ./books [--recursive]
+        recursive = "--recursive" in sys.argv
+        result = ingest_pdf_dir(sys.argv[2], recursive=recursive)
+        print(f"入库完成：{result['ok']} 本 PDF，跳过 {result['skipped']} 本")
+        if result["failed"]:
+            print(f"失败 {len(result['failed'])} 本：{result['failed']}")
+
     elif cmd == "query" and len(sys.argv) >= 3:
-        q = " ".join(sys.argv[2:])
-        for h in retrieve(q):
-            print(f"\n[score={h['score']:.3f}] {h['meta'].get('title','?')}")
+        q = " ".join(a for a in sys.argv[2:] if not a.startswith("--"))
+        stype = _get_arg(sys.argv, "--type", None)   # type: ignore[arg-type]
+        for h in retrieve(q, source_type=stype or None):
+            print(f"\n[score={h['score']:.3f}][{h['meta'].get('source_type','?')}] "
+                  f"{h['meta'].get('title','?')}")
             print(h["content"][:200])
 
     else:
-        print("用法: python -m x_agent.rag [stats | ingest <file> | query <问题>]")
+        print(
+            "用法:\n"
+            "  python -m x_agent.rag stats\n"
+            "  python -m x_agent.rag ingest <file.txt|file.pdf> [--title X] [--author X] [--type X]\n"
+            "  python -m x_agent.rag ingest-dir <dir> [--recursive]\n"
+            "  python -m x_agent.rag query <问题> [--type pdf|book|article|report]\n"
+        )

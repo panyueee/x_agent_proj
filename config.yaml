@@ -433,12 +433,16 @@ weread:
   cookie: ${WEREAD_COOKIE}      # 浏览器 Cookie（登录 weread.qq.com 后复制）
   max_chapters: 999             # 每本书最多抓取章节数（-1 为全部）
   sleep_sec: 0.5                # 章节间休眠（秒），避免触发风控
+  # 先运行 python -m x_agent.weread_fetcher shelf 查看书架和 book_id，再填到这里
   books: []
-  # 示例（填写 book_id 后自动抓取并入 RAG）：
+  # 示例：
   # books:
   #   - id: "CB_3w2f80f60f8aa0b0b"
   #     title: 投资中最简单的事
   #     author: 邱国鹭
+  #   - id: "CB_915e4f607a4e4fa5d"
+  #     title: 彼得·林奇的成功投资
+  #     author: 彼得·林奇
 
 rag:
   db_path: ${RAG_DB_PATH:-./output/rag.db}   # RAG 知识库路径
@@ -448,6 +452,10 @@ rag:
   ingest_tweets: true           # --source rag 时是否入库推文/信号
   ingest_reports: true          # --source rag 时是否入库研报
   ingest_weread: true           # --source rag 时是否入库微信读书（需 weread.enabled: true）
+  ingest_pdfs: true             # --source rag 时是否扫描 pdf_dirs 入库
+  pdf_dirs:                     # PDF 书籍本地目录（支持多个）
+    - ./books                   # 把 PDF 放这里即可自动入库
+  pdf_recursive: false          # 是否递归扫描子目录
 
 psych:
   enabled: true

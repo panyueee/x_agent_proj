@@ -188,6 +188,7 @@ HELP_TEXT = """\
 • `淘股吧` / `tgb` → 大V最新动态
 • `知识库` / `kb` → 知识库入库统计
 • `搜索 <关键词>` → 知识库检索（不生成回答）
+• `状态` / `status` → 系统运行状态
 • `帮助` / `help` → 本帮助
 """
 
@@ -320,6 +321,54 @@ def _cmd_kb() -> tuple[str, str, str]:
         return "知识库", f"获取失败：{e}", "red"
 
 
+def _cmd_status() -> tuple[str, str, str]:
+    """系统状态：DB 统计 + digest 最后更新时间 + RAG 知识库。"""
+    import datetime as _dt
+    lines = []
+
+    # Digest 最后更新
+    p = Path("./output/digest.md")
+    if p.exists():
+        ts = _dt.datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        lines.append(f"📊 摘要最后更新：**{ts}**")
+    else:
+        lines.append("📊 摘要：尚未生成")
+
+    # DB 推文统计
+    try:
+        from x_agent.storage import Store
+        store = Store()
+        total_tweets = store.conn.execute("SELECT COUNT(*) FROM tweets").fetchone()[0]
+        tgb_count    = store.conn.execute(
+            "SELECT COUNT(*) FROM tweets WHERE source='taoguba'"
+        ).fetchone()[0]
+        xhs_count    = store.conn.execute(
+            "SELECT COUNT(*) FROM tweets WHERE source='xiaohongshu'"
+        ).fetchone()[0]
+        lines.append(
+            f"🗃 数据库：推文 **{total_tweets}** 条"
+            f"（淘股吧 {tgb_count} / 小红书 {xhs_count}）"
+        )
+        # 最新一条入库时间
+        last_row = store.conn.execute(
+            "SELECT created_at FROM tweets ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if last_row:
+            lines.append(f"⏱ 最新内容：{(last_row[0] or '')[:16].replace('T',' ')}")
+    except Exception as e:
+        lines.append(f"🗃 数据库：读取失败 ({e})")
+
+    # RAG
+    try:
+        from x_agent.rag import collection_stats
+        s = collection_stats()
+        lines.append(f"📚 知识库：**{s['total_chunks']}** 块 / 书籍 **{s['book_count']}** 本")
+    except Exception:
+        lines.append("📚 知识库：未初始化")
+
+    return "🖥 系统状态", "\n".join(lines), "grey"
+
+
 def _cmd_search(query: str) -> tuple[str, str, str]:
     try:
         from x_agent.rag import retrieve, collection_stats
@@ -398,6 +447,9 @@ def _handle_text(text: str) -> tuple[str, str, str]:
         query = t.split(" ", 1)[1].strip()
         if query:
             return _cmd_search(query)
+
+    if tl in ("状态", "status", "系统状态"):
+        return _cmd_status()
 
     # 其余进 RAG 问答
     return _cmd_rag(t)
@@ -492,6 +544,53 @@ class PushPayload(BaseModel):
     body:     str
     color:    str = "orange"
     chat_id:  str = ""          # 不填则用环境变量 FEISHU_PUSH_CHAT_ID
+
+@app.post("/push_digest")
+async def push_digest(chat_id: str = ""):
+    """
+    读取最新 digest.md，提取关键板块后推送到飞书群。
+    main.py 每次 build_digest() 后自动调用。
+    """
+    target = chat_id or PUSH_CHAT_ID
+    if not target:
+        raise HTTPException(400, "chat_id 未设置")
+
+    try:
+        p = Path("./output/digest.md")
+        if not p.exists():
+            raise HTTPException(404, "digest.md 不存在")
+        raw = p.read_text(encoding="utf-8")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+    # 按 ## 切分板块，挑选重要的推送
+    import re as _re
+    sections = _re.split(r"\n(?=## )", raw)
+    priority_keywords = ["行情", "Panic", "心理", "淘股吧", "策略信号", "Web3"]
+    header_line = sections[0].strip() if sections else ""
+
+    selected = [header_line] if header_line else []
+    for sec in sections[1:]:
+        if any(k in sec[:30] for k in priority_keywords):
+            selected.append(sec.strip())
+        if sum(len(s) for s in selected) > 3600:
+            selected.append("\n…（更多内容见完整 digest.md）")
+            break
+
+    body = "\n\n".join(selected)
+    if not body.strip():
+        body = raw[:3800]
+
+    ts = Path("./output/digest.md").stat().st_mtime
+    import datetime as _dt
+    ts_str = _dt.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+
+    card = _card(f"📊 行情摘要  {ts_str}", body, "blue")
+    result = _send_card(target, card, receive_id_type="chat_id")
+    return {"ok": True, "feishu": result}
+
 
 @app.post("/push")
 async def push_alert(payload: PushPayload):

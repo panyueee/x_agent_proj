@@ -433,6 +433,7 @@ def run_once(cfg, client, store, source, llm=None):
         for r in reports:
             store.save_report(r)
         print(f"[research] 保存研报 {len(reports)} 篇")
+        _ingest_reports_to_rag(reports)
         return
 
     if source == "qcc":
@@ -816,6 +817,47 @@ def run_psych(cfg, store, llm=None):
         _feishu_push_panic(score, signal, data, llm_report, psych_cfg)
 
 
+def _ingest_reports_to_rag(reports: list):
+    """将研报标题 + 摘要批量入 RAG，供飞书知识库问答使用。"""
+    if not reports:
+        return
+    try:
+        from x_agent.rag import ingest_article
+    except ImportError:
+        return
+    added = 0
+    for r in reports:
+        content = f"评级：{r.rating}  目标价：{r.target_price or '—'}\n{r.summary or r.title}"
+        n = ingest_article(
+            url=r.url or f"research:{r.report_id}",
+            content=content,
+            title=f"[{r.org_name}] {r.stock_name} — {r.title}",
+            author=r.analyst,
+            published_at=r.published_at,
+            source_type="report",
+        )
+        added += n
+    print(f"[rag] 研报入库 {added} 块（共 {len(reports)} 篇）")
+
+
+def _feishu_push_digest(cfg: dict):
+    """digest 更新后推送摘要卡片到飞书群（仅当配置了 bot_url 和 push_chat_id 时）。"""
+    bot_url     = os.environ.get("FEISHU_BOT_URL", "").rstrip("/")
+    push_chat   = os.environ.get("FEISHU_PUSH_CHAT_ID", "")
+    if not bot_url or not push_chat:
+        return
+    try:
+        import urllib.request as _ur
+        url  = f"{bot_url}/push_digest?chat_id={push_chat}"
+        req  = _ur.Request(url, method="POST",
+                           headers={"Content-Type": "application/json"})
+        with _ur.urlopen(req, timeout=15):
+            pass
+        print("[feishu] 摘要已推送至飞书群")
+    except Exception as e:
+        print(f"[feishu] 摘要推送失败（跳过）: {e}")
+
+
 def _feishu_push_panic(score: float, signal: str, data: dict,
                        llm_report: dict, psych_cfg: dict):
     """向飞书群推送 Panic Index 预警卡片（仅当 feishu_bot 在线时）。"""
@@ -906,6 +948,8 @@ def main():
         # 在摘要文件末尾追加北向资金一行（若有数据）
         _append_north_flow_to_digest(store, cfg["digest"]["output_path"])
         print(f"摘要已写入 {cfg['digest']['output_path']}")
+        # digest 更新后推送到飞书群
+        _feishu_push_digest(cfg)
         if not interval:
             break
         print(f"等待 {interval} 分钟后再次抓取 ...\n")

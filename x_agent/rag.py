@@ -21,6 +21,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -62,13 +63,12 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
-_conn: Optional[sqlite3.Connection] = None
+_local = threading.local()
 
 def _db() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        _conn = _get_conn()
-    return _conn
+    if not hasattr(_local, "conn") or _local.conn is None:
+        _local.conn = _get_conn()
+    return _local.conn
 
 
 # ── 分块工具 ─────────────────────────────────────────────────────────────────

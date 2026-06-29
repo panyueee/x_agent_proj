@@ -811,6 +811,56 @@ def run_psych(cfg, store, llm=None):
     if llm_report.get("contrarian_rationale"):
         print(f"[心理] 逆向逻辑: {llm_report['contrarian_rationale']}")
 
+    # 触发飞书主动推送（仅在逆向信号出现时）
+    if signal in ("buy", "sell"):
+        _feishu_push_panic(score, signal, data, llm_report, psych_cfg)
+
+
+def _feishu_push_panic(score: float, signal: str, data: dict,
+                       llm_report: dict, psych_cfg: dict):
+    """向飞书群推送 Panic Index 预警卡片（仅当 feishu_bot 在线时）。"""
+    bot_url = os.environ.get("FEISHU_BOT_URL", "").rstrip("/")
+    if not bot_url:
+        return   # 未配置则静默跳过
+
+    signal_cn = {"buy": "🔼 逆向买入预警", "sell": "🔽 逆向减仓预警"}.get(signal, "")
+    color     = "red" if signal == "sell" else "green"
+
+    filled = int(score / 5)
+    bar = "█" * filled + "░" * (20 - filled)
+
+    body_lines = [
+        f"**Panic Index：{score:.0f} / 100**  `[{bar}]`",
+        f"信号：{signal_cn}",
+        f"恐慌帖 {data['fear_count']} / 贪婪帖 {data['greed_count']} / "
+        f"扫描 {data['total_posts']} 条",
+    ]
+    if llm_report.get("crowd_psychology"):
+        body_lines.append(f"\n> {llm_report['crowd_psychology']}")
+    if llm_report.get("contrarian_rationale"):
+        body_lines.append(f"\n**逆向逻辑**：{llm_report['contrarian_rationale']}")
+    if llm_report.get("short_term_outlook"):
+        body_lines.append(f"\n**展望**：{llm_report['short_term_outlook']}")
+
+    try:
+        import urllib.request as _ur
+        payload = json.dumps({
+            "title": f"⚠️ Panic Index 预警  —  {signal_cn}",
+            "body":  "\n".join(body_lines),
+            "color": color,
+        }).encode()
+        req = _ur.Request(
+            f"{bot_url}/push",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _ur.urlopen(req, timeout=10):
+            pass
+        print(f"[心理] 飞书预警已推送: {signal_cn}")
+    except Exception as e:
+        print(f"[心理] 飞书推送失败（跳过）: {e}")
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="X + 小红书 + 淘股吧 + 金融行情 + 产业链 + 研报 + 链上 Agent")
@@ -829,6 +879,13 @@ def main():
     args   = parse_args()
     cfg    = load_config(args.config)
     store  = Store(cfg["storage"]["db_path"])
+
+    # 从 config 注入飞书配置到环境变量（环境变量优先）
+    feishu_cfg = cfg.get("feishu", {})
+    if feishu_cfg.get("bot_url") and not os.environ.get("FEISHU_BOT_URL"):
+        os.environ["FEISHU_BOT_URL"] = feishu_cfg["bot_url"]
+    if feishu_cfg.get("push_chat_id") and not os.environ.get("FEISHU_PUSH_CHAT_ID"):
+        os.environ["FEISHU_PUSH_CHAT_ID"] = feishu_cfg["push_chat_id"]
     needs_x_client = args.source in ("x", "all", "pipeline")
     client = None
     if needs_x_client:

@@ -464,3 +464,9 @@ psych:
   use_llm: false          # true 时调 Claude 生成心理解读报告（需 ANTHROPIC_API_KEY）
   fear_threshold: 70      # Panic Index >= 此值时触发逆向买入预警
   greed_threshold: 30     # Panic Index <= 此值时触发逆向减仓预警
+
+feishu:
+  # 飞书 Bot 本地/远程地址，设置后 Panic Index 预警自动推送到飞书群
+  # 留空则不推送（FEISHU_BOT_URL 环境变量同效）
+  bot_url: ""             # 例：http://localhost:8002
+  push_chat_id: ""        # 推送目标群 chat_id（同 FEISHU_PUSH_CHAT_ID）

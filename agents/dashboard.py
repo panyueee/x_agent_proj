@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 import uvicorn
@@ -25,8 +25,10 @@ import uvicorn
 ROOT      = Path(__file__).parent.parent
 NOTES_DIR = Path(__file__).parent / "notes"
 LOGS_DIR  = Path(__file__).parent / "logs"
+BOOKS_DIR = ROOT / "books"
 NOTES_DIR.mkdir(exist_ok=True)
 LOGS_DIR.mkdir(exist_ok=True)
+BOOKS_DIR.mkdir(exist_ok=True)
 
 CLAUDE_BIN = "/Users/pany19/.nvm/versions/node/v22.22.2/bin/claude"
 
@@ -294,6 +296,79 @@ def _intervene(message: str):
     return _run_claude(cmd, header)
 
 
+# ── RAG 入库状态 ──────────────────────────────────────────────────────────────
+
+import sys as _sys
+_sys.path.insert(0, str(ROOT))
+
+_rag_state = {
+    "status": "idle",      # idle | running | done | error
+    "log":    [],          # 日志行列表
+    "stats":  {},          # 最新统计
+}
+_rag_lock = threading.Lock()
+
+
+def _rag_log(msg: str):
+    with _rag_lock:
+        _rag_state["log"].append(msg)
+        if len(_rag_state["log"]) > 500:
+            _rag_state["log"] = _rag_state["log"][-500:]
+
+
+def _rag_stats() -> dict:
+    try:
+        from x_agent.rag import collection_stats
+        return collection_stats()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _do_ingest_file(path: Path):
+    """后台线程：入库单个 PDF。"""
+    _rag_state["status"] = "running"
+    _rag_log(f"开始入库：{path.name}")
+    try:
+        from x_agent.rag import ingest_pdf
+        n = ingest_pdf(str(path))
+        _rag_log(f"✅ {path.name}  新增 {n} 块")
+        _rag_state["stats"] = _rag_stats()
+        _rag_state["status"] = "done"
+    except Exception as e:
+        _rag_log(f"❌ {path.name} 失败：{e}")
+        _rag_state["status"] = "error"
+
+
+def _do_ingest_dir(directory: Path, recursive: bool = False):
+    """后台线程：批量入库目录下所有 PDF。"""
+    _rag_state["status"] = "running"
+    pattern = "**/*.pdf" if recursive else "*.pdf"
+    pdfs = sorted(directory.glob(pattern))
+    _rag_log(f"扫描到 {len(pdfs)} 个 PDF，开始批量入库…")
+    if not pdfs:
+        _rag_log("目录中没有 PDF 文件。")
+        _rag_state["status"] = "done"
+        return
+    ok = skipped = 0
+    failed = []
+    for pdf in pdfs:
+        try:
+            from x_agent.rag import ingest_pdf
+            n = ingest_pdf(str(pdf))
+            if n > 0:
+                ok += 1
+                _rag_log(f"  ✅ {pdf.name}  新增 {n} 块")
+            else:
+                skipped += 1
+                _rag_log(f"  ⏭ {pdf.name}  已入库，跳过")
+        except Exception as e:
+            failed.append(pdf.name)
+            _rag_log(f"  ❌ {pdf.name}  {e}")
+    _rag_log(f"完成：入库 {ok} 本 / 跳过 {skipped} 本 / 失败 {len(failed)} 本")
+    _rag_state["stats"] = _rag_stats()
+    _rag_state["status"] = "done" if not failed else "error"
+
+
 # ── FastAPI ───────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Agent 开发看板")
@@ -375,6 +450,68 @@ def logs_stream():
             time.sleep(0.3)
     return StreamingResponse(event_gen(),
                              media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/rag/stats")
+def rag_stats():
+    stats = _rag_stats()
+    books_dir_files = [p.name for p in BOOKS_DIR.glob("*.pdf")]
+    return {
+        "stats":      stats,
+        "rag_status": _rag_state["status"],
+        "books_dir":  str(BOOKS_DIR),
+        "books_pdfs": books_dir_files,
+        "log":        _rag_state["log"][-50:],
+    }
+
+
+@app.post("/api/rag/upload")
+async def rag_upload(background_tasks: BackgroundTasks,
+                     file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "只支持 PDF 文件")
+    if _rag_state["status"] == "running":
+        raise HTTPException(409, "入库任务正在进行中，请稍候")
+
+    dest = BOOKS_DIR / file.filename
+    content = await file.read()
+    dest.write_bytes(content)
+    with _rag_lock:
+        _rag_state["log"] = []
+    _rag_log(f"已保存 {file.filename}（{len(content)//1024} KB）")
+    background_tasks.add_task(_do_ingest_file, dest)
+    return {"ok": True, "filename": file.filename, "size": len(content)}
+
+
+@app.post("/api/rag/ingest-dir")
+def rag_ingest_dir(background_tasks: BackgroundTasks,
+                   recursive: bool = False):
+    if _rag_state["status"] == "running":
+        raise HTTPException(409, "入库任务正在进行中，请稍候")
+    with _rag_lock:
+        _rag_state["log"] = []
+    background_tasks.add_task(_do_ingest_dir, BOOKS_DIR, recursive)
+    return {"ok": True, "directory": str(BOOKS_DIR)}
+
+
+@app.get("/api/rag/log/stream")
+def rag_log_stream():
+    """SSE：实时推送 RAG 入库日志。"""
+    def gen():
+        sent = 0
+        while True:
+            with _rag_lock:
+                lines = _rag_state["log"]
+                new   = lines[sent:]
+                sent  = len(lines)
+            for line in new:
+                yield f"data: {json.dumps(line, ensure_ascii=False)}\n\n"
+            # 入库结束后推送状态变化
+            yield f"data: {json.dumps('__status__:' + _rag_state['status'], ensure_ascii=False)}\n\n"
+            time.sleep(0.5)
+    return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
                                       "X-Accel-Buffering": "no"})
 
@@ -490,6 +627,75 @@ textarea:focus { border-color:#3b82f6; }
 .log-body .warn  { color:#fbbf24; }
 .log-body .err   { color:#f87171; }
 
+/* RAG 面板 */
+.rag-panel {
+  background:#1e2130; border:1px solid #2d3348; border-radius:12px;
+  margin-bottom:24px; overflow:hidden;
+}
+.rag-header {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:14px 20px; border-bottom:1px solid #2d3348;
+  background:#111827; gap:12px; flex-wrap:wrap;
+}
+.rag-title { font-size:15px; font-weight:600; color:#f8fafc; }
+.rag-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.rag-body { padding:16px 20px; display:flex; flex-direction:column; gap:14px; }
+.rag-stats { display:flex; gap:16px; flex-wrap:wrap; }
+.rag-stat {
+  background:#0f1117; border:1px solid #2d3348; border-radius:8px;
+  padding:10px 16px; min-width:100px;
+}
+.rag-stat-val { font-size:22px; font-weight:700; color:#60a5fa; }
+.rag-stat-lbl { font-size:11px; color:#64748b; margin-top:2px; }
+.rag-type-row { display:flex; gap:8px; flex-wrap:wrap; }
+.rag-type-tag {
+  font-size:11px; padding:3px 10px; border-radius:12px;
+  background:#1e293b; color:#94a3b8;
+}
+
+/* 拖拽上传区域 */
+.drop-zone {
+  border:2px dashed #2d3348; border-radius:10px;
+  padding:28px 20px; text-align:center; cursor:pointer;
+  transition:border-color .2s, background .2s; position:relative;
+}
+.drop-zone:hover, .drop-zone.drag-over {
+  border-color:#3b82f6; background:#0f1825;
+}
+.drop-zone input[type=file] {
+  position:absolute; inset:0; opacity:0; cursor:pointer; width:100%; height:100%;
+}
+.drop-label { font-size:13px; color:#64748b; pointer-events:none; }
+.drop-label strong { color:#94a3b8; }
+
+/* RAG 日志 */
+.rag-log {
+  font-family:"SF Mono","Fira Code",monospace; font-size:11.5px; line-height:1.6;
+  background:#0a0c10; border:1px solid #2d3348; border-radius:8px;
+  padding:10px 14px; max-height:180px; overflow-y:auto;
+  color:#a3e635; white-space:pre-wrap; word-break:break-all;
+}
+.rag-log .ok   { color:#4ade80; }
+.rag-log .skip { color:#64748b; }
+.rag-log .fail { color:#f87171; }
+
+.btn-sm {
+  background:#334155; color:#cbd5e1; border:none; border-radius:6px;
+  padding:6px 14px; font-size:12px; cursor:pointer;
+  transition:background .15s; white-space:nowrap;
+}
+.btn-sm:hover { background:#475569; }
+.btn-sm:disabled { opacity:.4; cursor:default; }
+.btn-sm.primary { background:#2563eb; color:#fff; }
+.btn-sm.primary:hover { background:#1d4ed8; }
+.rag-status-badge {
+  font-size:11px; font-weight:600; padding:3px 10px; border-radius:12px;
+}
+.rag-idle    { background:#1e293b; color:#64748b; }
+.rag-running { background:#451a03; color:#fb923c; }
+.rag-done    { background:#14532d; color:#4ade80; }
+.rag-error   { background:#450a0a; color:#f87171; }
+
 /* 干预输入框 */
 .intervene-row {
   display:flex; gap:8px; padding:12px 16px;
@@ -530,6 +736,48 @@ textarea:focus { border-color:#3b82f6; }
 
 <div class="grid" id="grid">
   <div class="card" style="color:#64748b">加载中...</div>
+</div>
+
+<!-- ── 知识库管理面板 ── -->
+<div class="rag-panel">
+  <div class="rag-header">
+    <span class="rag-title">📚 RAG 知识库管理</span>
+    <div class="rag-actions">
+      <span class="rag-status-badge rag-idle" id="rag-badge">空闲</span>
+      <button class="btn-sm primary" onclick="ragIngestDir(false)" id="btn-ingest-dir">
+        🔄 扫描 books/ 入库
+      </button>
+      <button class="btn-sm" onclick="refreshRagStats()">刷新统计</button>
+    </div>
+  </div>
+  <div class="rag-body">
+    <!-- 统计 -->
+    <div class="rag-stats" id="rag-stats">
+      <div class="rag-stat"><div class="rag-stat-val" id="stat-chunks">—</div>
+        <div class="rag-stat-lbl">知识块</div></div>
+      <div class="rag-stat"><div class="rag-stat-val" id="stat-books">—</div>
+        <div class="rag-stat-lbl">书籍</div></div>
+      <div class="rag-stat"><div class="rag-stat-val" id="stat-pdfs">—</div>
+        <div class="rag-stat-lbl">books/ 中 PDF</div></div>
+    </div>
+    <div class="rag-type-row" id="rag-types"></div>
+
+    <!-- 拖拽上传 -->
+    <div class="drop-zone" id="drop-zone"
+         ondragover="event.preventDefault();this.classList.add('drag-over')"
+         ondragleave="this.classList.remove('drag-over')"
+         ondrop="handleDrop(event)">
+      <input type="file" accept=".pdf" multiple id="file-input"
+             onchange="handleFileSelect(event)">
+      <div class="drop-label">
+        📄 拖拽 PDF 到此处，或 <strong>点击选择文件</strong><br>
+        <span style="font-size:11px;color:#475569">支持多选，文件将保存到 books/ 并自动入库</span>
+      </div>
+    </div>
+
+    <!-- 日志 -->
+    <div class="rag-log" id="rag-log"><span style="color:#475569">等待操作...</span></div>
+  </div>
 </div>
 
 <!-- 日志面板 -->
@@ -690,6 +938,117 @@ async function stopRun() {
   updateRunBadge('idle');
 }
 
+// ── RAG 知识库管理 ────────────────────────────────────────────────────────────
+
+const RAG_STATUS_LABEL = {idle:'空闲', running:'入库中...', done:'完成', error:'出错'};
+const RAG_STATUS_CLASS = {idle:'rag-idle', running:'rag-running', done:'rag-done', error:'rag-error'};
+let ragLogES = null;
+
+function updateRagBadge(status) {
+  const el = document.getElementById('rag-badge');
+  el.className = 'rag-status-badge ' + (RAG_STATUS_CLASS[status] || 'rag-idle');
+  el.textContent = RAG_STATUS_LABEL[status] || status;
+  const busy = status === 'running';
+  document.getElementById('btn-ingest-dir').disabled = busy;
+  document.getElementById('file-input').disabled = busy;
+  document.getElementById('drop-zone').style.opacity = busy ? '0.5' : '1';
+  document.getElementById('drop-zone').style.pointerEvents = busy ? 'none' : '';
+}
+
+function appendRagLog(line) {
+  if (line.startsWith('__status__:')) {
+    updateRagBadge(line.slice(11));
+    return;
+  }
+  const el = document.getElementById('rag-log');
+  if (el.querySelector('span')) el.innerHTML = '';
+  const div = document.createElement('div');
+  if (line.includes('✅')) div.className = 'ok';
+  else if (line.includes('⏭')) div.className = 'skip';
+  else if (line.includes('❌')) div.className = 'fail';
+  div.textContent = line;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+
+function startRagLogStream() {
+  if (ragLogES) ragLogES.close();
+  ragLogES = new EventSource('/api/rag/log/stream');
+  ragLogES.onmessage = e => appendRagLog(JSON.parse(e.data));
+}
+
+async function refreshRagStats() {
+  try {
+    const r = await fetch('/api/rag/stats');
+    const d = await r.json();
+    const s = d.stats || {};
+    document.getElementById('stat-chunks').textContent = s.total_chunks ?? '—';
+    document.getElementById('stat-books').textContent  = s.book_count   ?? '—';
+    document.getElementById('stat-pdfs').textContent   = (d.books_pdfs || []).length;
+    updateRagBadge(d.rag_status || 'idle');
+
+    // 分类标签
+    const types = s.by_type || {};
+    const CN = {book:'微信读书', pdf:'PDF', article:'文章', report:'研报', other:'其他'};
+    document.getElementById('rag-types').innerHTML =
+      Object.entries(types).sort((a,b)=>b[1]-a[1]).map(([t,n]) =>
+        `<span class="rag-type-tag">${CN[t]||t}：${n}</span>`
+      ).join('');
+  } catch(e) { console.error(e); }
+}
+
+async function uploadFile(file) {
+  const fd = new FormData();
+  fd.append('file', file);
+  document.getElementById('rag-log').innerHTML = '';
+  appendRagLog(`上传 ${file.name}（${(file.size/1024).toFixed(0)} KB）...`);
+  updateRagBadge('running');
+  const r = await fetch('/api/rag/upload', {method:'POST', body: fd});
+  if (!r.ok) {
+    const d = await r.json();
+    appendRagLog('❌ 上传失败：' + (d.detail || ''));
+    updateRagBadge('error');
+  }
+}
+
+async function handleFileSelect(e) {
+  const files = [...e.target.files];
+  if (!files.length) return;
+  startRagLogStream();
+  for (const f of files) {
+    if (!f.name.toLowerCase().endsWith('.pdf')) {
+      appendRagLog(`⏭ 跳过非 PDF 文件：${f.name}`);
+      continue;
+    }
+    await uploadFile(f);
+  }
+  e.target.value = '';
+  setTimeout(refreshRagStats, 1000);
+}
+
+async function handleDrop(e) {
+  e.preventDefault();
+  document.getElementById('drop-zone').classList.remove('drag-over');
+  const files = [...e.dataTransfer.files].filter(f => f.name.toLowerCase().endsWith('.pdf'));
+  if (!files.length) { appendRagLog('⚠️ 请拖入 PDF 文件'); return; }
+  startRagLogStream();
+  for (const f of files) await uploadFile(f);
+  setTimeout(refreshRagStats, 1000);
+}
+
+async function ragIngestDir(recursive) {
+  startRagLogStream();
+  document.getElementById('rag-log').innerHTML = '';
+  updateRagBadge('running');
+  const r = await fetch(`/api/rag/ingest-dir?recursive=${recursive}`, {method:'POST'});
+  if (!r.ok) {
+    const d = await r.json();
+    appendRagLog('❌ ' + (d.detail || ''));
+    updateRagBadge('error');
+  }
+  setTimeout(refreshRagStats, 2000);
+}
+
 // ── 主循环 ────────────────────────────────────────────────────────────────────
 
 let countdown = 30;
@@ -701,7 +1060,9 @@ setInterval(() => {
 }, 1000);
 
 startLogStream();
+startRagLogStream();
 refreshCards();
+refreshRagStats();
 pollRunStatus();
 </script>
 </body>

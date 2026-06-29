@@ -6,6 +6,7 @@
     python3 _tgb_scraper.py article <url>
     python3 _tgb_scraper.py articles_batch <url1> [url2 ...]
     python3 _tgb_scraper.py stock <stock_code> <max_results>
+    python3 _tgb_scraper.py user_replies <user_id> <since_date>
 
 超时保护：进程启动时设置 SIGALRM，到期后强制 os._exit(1)，
 父进程的 killpg 兜底。
@@ -215,6 +216,102 @@ def scrape_articles_batch(urls):
     return results
 
 
+def scrape_user_replies(user_id, since_date_str, max_scroll=15):
+    """抓取用户对他人帖子的评论/回复记录。
+    淘股吧评论历史页：https://www.tgb.cn/blog/<user_id>/comment
+    """
+    url = f"{BASE}/blog/{user_id}/comment"
+    results = []
+    seen = set()
+
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = _new_browser(p)
+        try:
+            page = _new_page(browser)
+            try:
+                page.goto(url, wait_until="commit", timeout=20_000)
+            except Exception:
+                return []
+            page.wait_for_timeout(1500)
+
+            # 滚动并按日期截止
+            prev_h = 0
+            for _ in range(max_scroll):
+                page.keyboard.press("End")
+                page.wait_for_timeout(800)
+                try:
+                    body_text = page.inner_text("body")
+                    dates = re.findall(r"\d{4}-\d{2}-\d{2}", body_text)
+                    if dates and min(dates) < since_date_str:
+                        break
+                except Exception:
+                    pass
+                h = page.evaluate("document.body.scrollHeight")
+                if h == prev_h:
+                    break
+                prev_h = h
+
+            # 从 DOM 提取每条评论：文章链接 + 评论文字 + 时间
+            items = page.evaluate("""
+                () => {
+                    const out = [];
+                    const seen = new Set();
+                    const links = document.querySelectorAll(
+                        'a[href*="/a/"], a[href*="/Article/"]'
+                    );
+                    for (const link of links) {
+                        const href = link.href;
+                        if (!href || seen.has(href)) continue;
+                        seen.add(href);
+                        let container = link.closest('li')
+                            || link.closest('[class*="item"]')
+                            || link.closest('[class*="reply"]')
+                            || link.closest('[class*="comment"]')
+                            || link.parentElement;
+                        const fullText = container ? container.innerText.trim() : '';
+                        const dateMatch = fullText.match(
+                            /\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}/
+                        );
+                        out.push({
+                            article_url:   href,
+                            article_title: link.innerText.trim(),
+                            full_text:     fullText,
+                            created_at:    dateMatch ? dateMatch[0] : '',
+                        });
+                    }
+                    return out;
+                }
+            """)
+
+            for item in items:
+                art_url = item.get("article_url", "")
+                if not art_url or art_url in seen:
+                    continue
+                created_at = item.get("created_at", "")
+                if created_at and created_at[:10] < since_date_str:
+                    continue
+                full_text     = item.get("full_text", "")
+                article_title = item.get("article_title", "")
+                comment_text  = full_text.replace(article_title, "").replace(created_at, "").strip()
+
+                aid = re.search(r"/Article/(\d+)|/a/(\w+)", art_url)
+                art_id = (aid.group(1) or aid.group(2)) if aid else art_url.split("/")[-1]
+                reply_id = f"tgbreply_{user_id}_{art_id}"
+
+                seen.add(art_url)
+                results.append({
+                    "id":            reply_id,
+                    "article_url":   art_url,
+                    "article_title": article_title,
+                    "comment_text":  comment_text,
+                    "created_at":    created_at,
+                })
+        finally:
+            _close_browser(browser)
+    return results
+
+
 def scrape_stock_posts(stock_code, max_results):
     url = f"{BASE}/stock/{stock_code}"
     results = []
@@ -255,11 +352,12 @@ if __name__ == "__main__":
 
     # 按模式设置不同的 SIGALRM 硬超时
     _alarms = {
-        "blog":           50,
-        "blog_since":    100,
-        "article":        25,
-        "articles_batch": 150,
-        "stock":          50,
+        "blog":          50,
+        "blog_since":   100,
+        "article":       25,
+        "articles_batch":150,
+        "stock":         50,
+        "user_replies": 150,
     }
     _set_alarm(_alarms.get(mode, 120))
 
@@ -279,6 +377,9 @@ if __name__ == "__main__":
         elif mode == "stock":
             stock_code, max_r = sys.argv[2], int(sys.argv[3])
             print(json.dumps(scrape_stock_posts(stock_code, max_r), ensure_ascii=False))
+        elif mode == "user_replies":
+            user_id, since_date = sys.argv[2], sys.argv[3]
+            print(json.dumps(scrape_user_replies(user_id, since_date), ensure_ascii=False))
     except Exception as e:
         print(json.dumps([], ensure_ascii=False))
         sys.exit(1)

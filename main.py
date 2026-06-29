@@ -142,6 +142,13 @@ def fetch_tgb(cfg, since):
             collected += posts
         except Exception as e:
             print(f"[warn] 淘股吧用户 {uid}: {e}")
+        if tgb_cfg.get("fetch_replies", True):
+            try:
+                replies = client.user_replies(uid, since)
+                print(f"[tgb] 用户 {uid} 评论/回复 {len(replies)} 条")
+                collected += replies
+            except Exception as e:
+                print(f"[warn] 淘股吧用户 {uid} 评论: {e}")
     for stock in tgb_cfg.get("stocks", []):
         code = stock.get("code") if isinstance(stock, dict) else stock
         if not code:

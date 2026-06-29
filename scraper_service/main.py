@@ -14,6 +14,7 @@
   POST /articles_batch  {urls: [...]}                 → [{id,title,body,...}, ...]
   POST /article         {url}                         → {id,title,body,...}
   POST /stock           {stock_code, max_results}     → [{url, title}, ...]
+  POST /user_replies    {user_id, since_date}         → [{id,article_url,comment_text,...}, ...]
 """
 from __future__ import annotations
 
@@ -175,6 +176,11 @@ class StockReq(BaseModel):
     stock_code: str
     max_results: int = 10
 
+class UserRepliesReq(BaseModel):
+    user_id: str
+    since_date: str       # YYYY-MM-DD
+    max_scroll: int = 15
+
 
 # ── 路由 ────────────────────────────────────────────────────────────────
 @app.get("/health")
@@ -313,6 +319,91 @@ async def api_stock(req: StockReq) -> list[dict]:
                     results.append({"url": full, "title": title})
                     if len(results) >= req.max_results:
                         break
+    finally:
+        await _close_page(page)
+    return results
+
+
+@app.post("/user_replies", dependencies=[Depends(_auth)])
+async def api_user_replies(req: UserRepliesReq) -> list[dict]:
+    url = f"{BASE}/blog/{req.user_id}/comment"
+    results = []
+    seen: set[str] = set()
+    page = await _new_page()
+    try:
+        await page.goto(url, wait_until="commit", timeout=20_000)
+        await page.wait_for_timeout(1500)
+
+        prev_h = 0
+        for _ in range(req.max_scroll):
+            await page.keyboard.press("End")
+            await page.wait_for_timeout(800)
+            try:
+                body_text = await page.inner_text("body")
+                dates = re.findall(r"\d{4}-\d{2}-\d{2}", body_text)
+                if dates and min(dates) < req.since_date:
+                    break
+            except Exception:
+                pass
+            h = await page.evaluate("document.body.scrollHeight")
+            if h == prev_h:
+                break
+            prev_h = h
+
+        items = await page.evaluate("""
+            () => {
+                const out = [];
+                const seen = new Set();
+                const links = document.querySelectorAll(
+                    'a[href*="/a/"], a[href*="/Article/"]'
+                );
+                for (const link of links) {
+                    const href = link.href;
+                    if (!href || seen.has(href)) continue;
+                    seen.add(href);
+                    let container = link.closest('li')
+                        || link.closest('[class*="item"]')
+                        || link.closest('[class*="reply"]')
+                        || link.closest('[class*="comment"]')
+                        || link.parentElement;
+                    const fullText = container ? container.innerText.trim() : '';
+                    const dateMatch = fullText.match(
+                        /\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}/
+                    );
+                    out.push({
+                        article_url:   href,
+                        article_title: link.innerText.trim(),
+                        full_text:     fullText,
+                        created_at:    dateMatch ? dateMatch[0] : '',
+                    });
+                }
+                return out;
+            }
+        """)
+
+        for item in items:
+            art_url = item.get("article_url", "")
+            if not art_url or art_url in seen:
+                continue
+            created_at = item.get("created_at", "")
+            if created_at and created_at[:10] < req.since_date:
+                continue
+            full_text     = item.get("full_text", "")
+            article_title = item.get("article_title", "")
+            comment_text  = full_text.replace(article_title, "").replace(created_at, "").strip()
+
+            aid = re.search(r"/Article/(\d+)|/a/(\w+)", art_url)
+            art_id = (aid.group(1) or aid.group(2)) if aid else art_url.split("/")[-1]
+            reply_id = f"tgbreply_{req.user_id}_{art_id}"
+
+            seen.add(art_url)
+            results.append({
+                "id":            reply_id,
+                "article_url":   art_url,
+                "article_title": article_title,
+                "comment_text":  comment_text,
+                "created_at":    created_at,
+            })
     finally:
         await _close_page(page)
     return results

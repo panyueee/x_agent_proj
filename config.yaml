@@ -278,6 +278,7 @@ tgb:
   enabled: true
   max_per_user: 0        # 0 = 全量模式，按 lookback_days 回溯
   lookback_days: 90      # 回溯 3 个月
+  fetch_replies: true    # 同时抓用户对他人帖子的评论/回复
   max_per_stock: 10
   users:
     # 格式：id 为淘股吧用户数字 ID（URL /blog/<id> 中的数字），name 为昵称（仅供备注）

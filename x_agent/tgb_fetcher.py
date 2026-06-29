@@ -97,6 +97,12 @@ def _articles_batch(urls: list[str]) -> list[dict]:
     return arts
 
 
+def _user_replies(user_id: str, since_date: str) -> list[dict]:
+    if _SCRAPER_URL:
+        return _remote("/user_replies", {"user_id": user_id, "since_date": since_date})
+    return _run(["user_replies", user_id, since_date], retries=0, timeout=180)
+
+
 def _stock(stock_code: str, max_results: int) -> list[dict]:
     if _SCRAPER_URL:
         return _remote("/stock", {"stock_code": stock_code, "max_results": max_results})
@@ -159,6 +165,44 @@ class TgbClient:
             tw = _to_tweet(art, user_id)
             if tw.created_at and tw.created_at < since_iso:
                 continue
+            results.append(tw)
+        return results
+
+    def user_replies(self, user_id: str, since: dt.datetime) -> list[Tweet]:
+        """抓取用户对他人帖子的评论/回复。"""
+        since_str = since.strftime("%Y-%m-%d")
+        try:
+            items = _user_replies(user_id, since_str)
+        except Exception as e:
+            print(f"[tgb] user_replies 失败（user_id={user_id}）: {e}")
+            return []
+        if not items:
+            return []
+
+        since_iso = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+        results = []
+        for item in items:
+            created_at = ""
+            if item.get("created_at"):
+                try:
+                    ts = dt.datetime.strptime(item["created_at"], "%Y-%m-%d %H:%M")
+                    created_at = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+                except ValueError:
+                    pass
+            if created_at and created_at < since_iso:
+                continue
+            text = f"[评论]{item.get('article_title', '')}\n{item.get('comment_text', '')}"
+            tw = Tweet(
+                id=item["id"],
+                author=user_id,
+                author_id=user_id,
+                text=text.strip(),
+                created_at=created_at,
+                url=item.get("article_url", ""),
+                metrics={},
+                source_label=f"{user_id}_reply",
+                group_tag="taoguba_reply",
+            )
             results.append(tw)
         return results
 

@@ -466,6 +466,10 @@ psych:
   greed_threshold: 30     # Panic Index <= 此值时触发逆向减仓预警
 
 feishu:
+  app_id: cli_aacb563771795cef
+  app_secret: ${FEISHU_APP_SECRET}
+  bot_url: http://localhost:8002
+  push_chat_id:
   # 飞书 Bot 本地/远程地址，设置后 Panic Index 预警自动推送到飞书群
   # 留空则不推送（FEISHU_BOT_URL 环境变量同效）
   bot_url: ""             # 例：http://localhost:8002

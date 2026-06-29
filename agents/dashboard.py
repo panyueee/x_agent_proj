@@ -12,10 +12,12 @@ import subprocess
 import threading
 import time
 import json
+import urllib.request
+import urllib.parse
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, BackgroundTasks
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 import uvicorn
@@ -369,6 +371,170 @@ def _do_ingest_dir(directory: Path, recursive: bool = False):
     _rag_state["status"] = "done" if not failed else "error"
 
 
+# ── 百度网盘 OAuth + 文件同步 ────────────────────────────────────────────────
+
+BAIDU_APP_KEY    = os.environ.get("BAIDU_APP_KEY", "")
+BAIDU_APP_SECRET = os.environ.get("BAIDU_APP_SECRET", "")
+BAIDU_TOKEN_FILE = ROOT / "output" / "baidu_token.json"
+BAIDU_REDIRECT   = "http://localhost:8765/api/baidu/callback"
+
+# 百度网盘同步状态（与 RAG 共用 _rag_log / _rag_state）
+_bdu_sync = {
+    "status": "idle",   # idle | syncing | done | error
+    "log":    [],
+}
+_bdu_lock = threading.Lock()
+
+
+def _bdu_log(msg: str):
+    with _bdu_lock:
+        _bdu_sync["log"].append(msg)
+        if len(_bdu_sync["log"]) > 200:
+            _bdu_sync["log"] = _bdu_sync["log"][-200:]
+
+
+def _bdu_load_token() -> dict:
+    try:
+        if BAIDU_TOKEN_FILE.exists():
+            return json.loads(BAIDU_TOKEN_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+
+def _bdu_save_token(tok: dict):
+    BAIDU_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tok["saved_at"] = int(time.time())
+    BAIDU_TOKEN_FILE.write_text(json.dumps(tok, ensure_ascii=False, indent=2))
+
+
+def _bdu_access_token() -> str:
+    """返回有效 access_token，过期则用 refresh_token 续期。"""
+    tok = _bdu_load_token()
+    if not tok.get("access_token"):
+        return ""
+    # 若剩余有效期 < 3600s 则刷新
+    saved_at  = tok.get("saved_at", 0)
+    expires   = tok.get("expires_in", 2592000)
+    if time.time() - saved_at > expires - 3600:
+        tok = _bdu_refresh_token(tok)
+    return tok.get("access_token", "")
+
+
+def _bdu_refresh_token(tok: dict) -> dict:
+    rt = tok.get("refresh_token", "")
+    if not rt or not BAIDU_APP_KEY:
+        return tok
+    try:
+        params = urllib.parse.urlencode({
+            "grant_type":    "refresh_token",
+            "refresh_token": rt,
+            "client_id":     BAIDU_APP_KEY,
+            "client_secret": BAIDU_APP_SECRET,
+        }).encode()
+        req = urllib.request.Request(
+            "https://openapi.baidu.com/oauth/2.0/token",
+            data=params, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            new_tok = json.loads(resp.read())
+        if "access_token" in new_tok:
+            _bdu_save_token(new_tok)
+            return new_tok
+    except Exception as e:
+        print(f"[baidu] refresh token 失败: {e}")
+    return tok
+
+
+def _bdu_api(path: str, params: dict) -> dict:
+    """调用百度网盘 REST API。"""
+    at = _bdu_access_token()
+    if not at:
+        raise RuntimeError("未授权，请先连接百度网盘")
+    params["access_token"] = at
+    qs = urllib.parse.urlencode(params)
+    url = f"https://pan.baidu.com/rest/2.0/xpan/{path}?{qs}"
+    req = urllib.request.Request(url, headers={"User-Agent": "pan.baidu.com"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read())
+
+
+def _bdu_list_dir(dir_path: str = "/") -> list:
+    """列出目录中的 PDF 文件和子目录。"""
+    data = _bdu_api("file", {
+        "method": "list",
+        "dir":    dir_path,
+        "limit":  200,
+        "order":  "name",
+        "web":    "1",
+    })
+    items = []
+    for f in data.get("list", []):
+        name = f.get("server_filename", "")
+        is_dir = f.get("isdir", 0) == 1
+        if is_dir or name.lower().endswith(".pdf"):
+            items.append({
+                "fs_id":    f["fs_id"],
+                "name":     name,
+                "path":     f["path"],
+                "size":     f.get("size", 0),
+                "is_dir":   is_dir,
+            })
+    return items
+
+
+def _bdu_download_pdf(fs_id: int, filename: str) -> Path:
+    """下载单个 PDF 到 books/ 目录。"""
+    at = _bdu_access_token()
+    # 获取真实下载链接
+    qs = urllib.parse.urlencode({
+        "method":       "filemetas",
+        "access_token": at,
+        "fsids":        json.dumps([fs_id]),
+        "dlink":        1,
+    })
+    url = f"https://pan.baidu.com/rest/2.0/xpan/multimedia?{qs}"
+    req = urllib.request.Request(url, headers={"User-Agent": "pan.baidu.com"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        metas = json.loads(resp.read()).get("list", [])
+    if not metas:
+        raise RuntimeError(f"无法获取 {filename} 的下载链接")
+
+    dlink = metas[0]["dlink"] + f"&access_token={at}"
+    dest  = BOOKS_DIR / filename
+    req2  = urllib.request.Request(
+        dlink,
+        headers={"User-Agent": "pan.baidu.com"},
+    )
+    with urllib.request.urlopen(req2, timeout=120) as resp2:
+        dest.write_bytes(resp2.read())
+    return dest
+
+
+def _do_baidu_sync(files: list):
+    """后台线程：下载并入库勾选的百度网盘 PDF。"""
+    _bdu_sync["status"] = "syncing"
+    ok = failed = 0
+    for f in files:
+        name  = f["name"]
+        fs_id = f["fs_id"]
+        size_kb = f.get("size", 0) // 1024
+        _bdu_log(f"⬇ 下载 {name}（{size_kb} KB）...")
+        try:
+            dest = _bdu_download_pdf(fs_id, name)
+            _bdu_log(f"  → 已保存到 books/{name}")
+            from x_agent.rag import ingest_pdf
+            n = ingest_pdf(str(dest))
+            _bdu_log(f"  ✅ 入库 {n} 块")
+            ok += 1
+        except Exception as e:
+            _bdu_log(f"  ❌ 失败：{e}")
+            failed += 1
+    _bdu_log(f"同步完成：✅ {ok} 本 / ❌ {failed} 本")
+    _rag_state["stats"] = _rag_stats()
+    _bdu_sync["status"] = "done" if not failed else "error"
+
+
 # ── FastAPI ───────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Agent 开发看板")
@@ -514,6 +680,132 @@ def rag_log_stream():
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
                                       "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/baidu/status")
+def baidu_status():
+    tok = _bdu_load_token()
+    connected = bool(tok.get("access_token"))
+    return {
+        "connected":   connected,
+        "netdisk_name": tok.get("netdisk_name", ""),
+        "avatar_url":  tok.get("avatar_url", ""),
+        "app_key_set": bool(BAIDU_APP_KEY),
+        "sync_status": _bdu_sync["status"],
+        "sync_log":    _bdu_sync["log"][-30:],
+    }
+
+
+@app.get("/api/baidu/auth-url")
+def baidu_auth_url():
+    if not BAIDU_APP_KEY:
+        raise HTTPException(400, "请先在环境变量中设置 BAIDU_APP_KEY 和 BAIDU_APP_SECRET")
+    url = (
+        "https://openapi.baidu.com/oauth/2.0/authorize"
+        f"?response_type=code&client_id={BAIDU_APP_KEY}"
+        f"&redirect_uri={urllib.parse.quote(BAIDU_REDIRECT)}"
+        "&scope=basic,netdisk&display=popup"
+    )
+    return {"url": url}
+
+
+@app.get("/api/baidu/callback")
+async def baidu_callback(request: Request):
+    """OAuth 回调：用 code 换 token，保存后重定向回看板。"""
+    code = request.query_params.get("code", "")
+    if not code:
+        return HTMLResponse("<h3>授权失败：未收到 code</h3>", status_code=400)
+    params = urllib.parse.urlencode({
+        "grant_type":   "authorization_code",
+        "code":          code,
+        "client_id":     BAIDU_APP_KEY,
+        "client_secret": BAIDU_APP_SECRET,
+        "redirect_uri":  BAIDU_REDIRECT,
+    }).encode()
+    try:
+        req = urllib.request.Request(
+            "https://openapi.baidu.com/oauth/2.0/token",
+            data=params, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            tok = json.loads(resp.read())
+        if "access_token" not in tok:
+            return HTMLResponse(f"<h3>授权失败：{tok}</h3>", status_code=400)
+
+        # 获取用户网盘信息
+        try:
+            qs = urllib.parse.urlencode({"access_token": tok["access_token"]})
+            info_req = urllib.request.Request(
+                f"https://pan.baidu.com/rest/2.0/xpan/nas?method=uinfo&{qs}",
+                headers={"User-Agent": "pan.baidu.com"},
+            )
+            with urllib.request.urlopen(info_req, timeout=10) as r2:
+                uinfo = json.loads(r2.read())
+            tok["netdisk_name"] = uinfo.get("netdisk_name", "")
+            tok["avatar_url"]   = uinfo.get("avatar_url", "")
+        except Exception:
+            pass
+
+        _bdu_save_token(tok)
+        return HTMLResponse("""
+            <html><body style="font-family:sans-serif;text-align:center;padding:60px">
+            <h2>✅ 百度网盘授权成功！</h2>
+            <p>正在返回看板...</p>
+            <script>setTimeout(()=>window.close(),1500)</script>
+            </body></html>
+        """)
+    except Exception as e:
+        return HTMLResponse(f"<h3>授权失败：{e}</h3>", status_code=500)
+
+
+@app.get("/api/baidu/files")
+def baidu_files(dir: str = "/"):
+    try:
+        files = _bdu_list_dir(dir)
+        return {"files": files, "dir": dir}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+class BaiduSyncPayload(BaseModel):
+    files: list   # [{fs_id, name, size}, ...]
+
+
+@app.post("/api/baidu/sync")
+def baidu_sync(payload: BaiduSyncPayload, background_tasks: BackgroundTasks):
+    if _bdu_sync["status"] == "syncing":
+        raise HTTPException(409, "同步任务正在进行中")
+    if not payload.files:
+        raise HTTPException(400, "未选择文件")
+    with _bdu_lock:
+        _bdu_sync["log"] = []
+    background_tasks.add_task(_do_baidu_sync, payload.files)
+    return {"ok": True, "count": len(payload.files)}
+
+
+@app.get("/api/baidu/sync/log/stream")
+def baidu_sync_log_stream():
+    def gen():
+        sent = 0
+        while True:
+            with _bdu_lock:
+                lines = _bdu_sync["log"]
+                new   = lines[sent:]
+                sent  = len(lines)
+            for line in new:
+                yield f"data: {json.dumps(line, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps('__status__:' + _bdu_sync['status'])}\n\n"
+            time.sleep(0.5)
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+@app.delete("/api/baidu/disconnect")
+def baidu_disconnect():
+    if BAIDU_TOKEN_FILE.exists():
+        BAIDU_TOKEN_FILE.unlink()
+    return {"ok": True}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -688,6 +980,15 @@ textarea:focus { border-color:#3b82f6; }
 .btn-sm:disabled { opacity:.4; cursor:default; }
 .btn-sm.primary { background:#2563eb; color:#fff; }
 .btn-sm.primary:hover { background:#1d4ed8; }
+.bdu-file-item {
+  display:flex; align-items:center; gap:8px;
+  padding:7px 14px; border-bottom:1px solid #1a1f2e; cursor:pointer;
+}
+.bdu-file-item:hover { background:#111827; }
+.bdu-file-item:last-child { border-bottom:none; }
+.bdu-file-item input[type=checkbox] { cursor:pointer; accent-color:#3b82f6; }
+.bdu-file-name { flex:1; color:#cbd5e1; }
+.bdu-file-size { font-size:10px; color:#475569; }
 .rag-status-badge {
   font-size:11px; font-weight:600; padding:3px 10px; border-radius:12px;
 }
@@ -775,7 +1076,35 @@ textarea:focus { border-color:#3b82f6; }
       </div>
     </div>
 
-    <!-- 日志 -->
+    <!-- 百度网盘同步 -->
+    <div style="border-top:1px solid #2d3348;padding-top:14px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+        <span style="font-size:13px;font-weight:600;color:#94a3b8">☁️ 百度网盘同步</span>
+        <div style="display:flex;gap:8px;align-items:center" id="bdu-controls">
+          <span id="bdu-badge" style="font-size:11px;padding:3px 10px;border-radius:12px;background:#1e293b;color:#64748b">未连接</span>
+          <button class="btn-sm" id="btn-bdu-auth" onclick="bduAuth()">🔑 授权连接</button>
+          <button class="btn-sm" id="btn-bdu-disconnect" onclick="bduDisconnect()" style="display:none;color:#f87171">断开</button>
+        </div>
+      </div>
+
+      <!-- 已连接：文件浏览 -->
+      <div id="bdu-browser" style="display:none">
+        <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center">
+          <input id="bdu-dir" value="/" style="flex:1;background:#0f1117;border:1px solid #2d3348;border-radius:6px;color:#e2e8f0;padding:6px 10px;font-size:12px;outline:none"
+                 placeholder="/我的文档/books" onkeydown="if(event.key==='Enter')bduListDir()">
+          <button class="btn-sm" onclick="bduListDir()">📂 浏览</button>
+          <button class="btn-sm primary" id="btn-bdu-sync" onclick="bduSync()">⬇ 同步选中</button>
+        </div>
+        <div id="bdu-file-list" style="background:#0a0c10;border:1px solid #2d3348;border-radius:8px;max-height:200px;overflow-y:auto;font-size:12px">
+          <div style="color:#475569;padding:12px 14px">点击「浏览」查看目录中的 PDF 文件</div>
+        </div>
+      </div>
+
+      <!-- 同步日志 -->
+      <div class="rag-log" id="bdu-log" style="margin-top:10px"><span style="color:#475569">等待同步...</span></div>
+    </div>
+
+    <!-- 本地入库日志 -->
     <div class="rag-log" id="rag-log"><span style="color:#475569">等待操作...</span></div>
   </div>
 </div>
@@ -1047,6 +1376,148 @@ async function ragIngestDir(recursive) {
     updateRagBadge('error');
   }
   setTimeout(refreshRagStats, 2000);
+}
+
+// ── 百度网盘 ──────────────────────────────────────────────────────────────────
+
+let bduLogES = null;
+let bduFiles = [];   // 当前目录文件列表
+
+async function refreshBduStatus() {
+  const r = await fetch('/api/baidu/status');
+  const d = await r.json();
+  const badge = document.getElementById('bdu-badge');
+  const btnAuth = document.getElementById('btn-bdu-auth');
+  const btnDis  = document.getElementById('btn-bdu-disconnect');
+  const browser = document.getElementById('bdu-browser');
+
+  if (d.connected) {
+    badge.style.background = '#14532d'; badge.style.color = '#4ade80';
+    badge.textContent = '✅ ' + (d.netdisk_name || '已连接');
+    btnAuth.style.display = 'none';
+    btnDis.style.display  = '';
+    browser.style.display = '';
+  } else {
+    badge.style.background = '#1e293b'; badge.style.color = '#64748b';
+    badge.textContent = '未连接';
+    btnAuth.style.display = '';
+    btnDis.style.display  = 'none';
+    browser.style.display = 'none';
+  }
+
+  // 同步状态
+  const syncStatus = d.sync_status || 'idle';
+  document.getElementById('btn-bdu-sync').disabled = syncStatus === 'syncing';
+
+  // 追加日志
+  const logEl = document.getElementById('bdu-log');
+  if (d.sync_log && d.sync_log.length) {
+    if (logEl.querySelector('span')) logEl.innerHTML = '';
+    d.sync_log.forEach(line => {
+      const div = document.createElement('div');
+      if (line.includes('✅')) div.className = 'ok';
+      else if (line.includes('❌')) div.className = 'fail';
+      div.textContent = line;
+      logEl.appendChild(div);
+    });
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+}
+
+async function bduAuth() {
+  try {
+    const r = await fetch('/api/baidu/auth-url');
+    if (!r.ok) { const d = await r.json(); alert(d.detail); return; }
+    const {url} = await r.json();
+    const popup = window.open(url, 'bdu_auth', 'width=600,height=700');
+    // 轮询弹窗关闭后刷新状态
+    const timer = setInterval(() => {
+      if (popup.closed) { clearInterval(timer); refreshBduStatus(); }
+    }, 1000);
+  } catch(e) { alert('获取授权 URL 失败：' + e); }
+}
+
+async function bduDisconnect() {
+  if (!confirm('确定断开百度网盘连接？')) return;
+  await fetch('/api/baidu/disconnect', {method:'DELETE'});
+  refreshBduStatus();
+}
+
+async function bduListDir() {
+  const dir = document.getElementById('bdu-dir').value.trim() || '/';
+  const listEl = document.getElementById('bdu-file-list');
+  listEl.innerHTML = '<div style="color:#64748b;padding:12px 14px">加载中...</div>';
+  try {
+    const r = await fetch('/api/baidu/files?dir=' + encodeURIComponent(dir));
+    if (!r.ok) { const d = await r.json(); listEl.innerHTML = `<div style="color:#f87171;padding:12px">${d.detail}</div>`; return; }
+    const {files} = await r.json();
+    bduFiles = files;
+    if (!files.length) {
+      listEl.innerHTML = '<div style="color:#475569;padding:12px 14px">目录中没有 PDF 文件或子目录</div>';
+      return;
+    }
+    listEl.innerHTML = files.map((f, i) => {
+      if (f.is_dir) {
+        return `<div class="bdu-file-item" onclick="bduNavDir('${f.path.replace(/'/g,"\\'")}')">
+          <span>📁</span>
+          <span class="bdu-file-name">${f.name}/</span>
+          <span class="bdu-file-size">目录</span>
+        </div>`;
+      }
+      const kb = Math.round(f.size / 1024);
+      const mb = (f.size / 1024 / 1024).toFixed(1);
+      return `<div class="bdu-file-item">
+        <input type="checkbox" data-idx="${i}" checked>
+        <span>📄</span>
+        <span class="bdu-file-name">${f.name}</span>
+        <span class="bdu-file-size">${kb > 1024 ? mb + ' MB' : kb + ' KB'}</span>
+      </div>`;
+    }).join('');
+  } catch(e) { listEl.innerHTML = `<div style="color:#f87171;padding:12px">${e}</div>`; }
+}
+
+function bduNavDir(path) {
+  document.getElementById('bdu-dir').value = path;
+  bduListDir();
+}
+
+async function bduSync() {
+  const checked = [...document.querySelectorAll('#bdu-file-list input[type=checkbox]:checked')];
+  if (!checked.length) { alert('请先勾选要同步的 PDF 文件'); return; }
+  const selected = checked.map(cb => bduFiles[parseInt(cb.dataset.idx)]);
+
+  const logEl = document.getElementById('bdu-log');
+  logEl.innerHTML = '';
+  document.getElementById('btn-bdu-sync').disabled = true;
+
+  // 启动 SSE 日志流
+  if (bduLogES) bduLogES.close();
+  bduLogES = new EventSource('/api/baidu/sync/log/stream');
+  bduLogES.onmessage = e => {
+    const line = JSON.parse(e.data);
+    if (line.startsWith('__status__:')) {
+      const st = line.slice(11);
+      if (st !== 'syncing') {
+        document.getElementById('btn-bdu-sync').disabled = false;
+        refreshRagStats();
+      }
+      return;
+    }
+    if (logEl.querySelector('span')) logEl.innerHTML = '';
+    const div = document.createElement('div');
+    if (line.includes('✅')) div.className = 'ok';
+    else if (line.includes('❌')) div.className = 'fail';
+    else if (line.includes('⬇')) div.className = 'info';
+    div.textContent = line;
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+  };
+
+  await fetch('/api/baidu/sync', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({files: selected})
+  });
 }
 
 // ── 主循环 ────────────────────────────────────────────────────────────────────

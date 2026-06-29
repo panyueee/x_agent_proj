@@ -53,6 +53,8 @@ def _get_conn() -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_type   ON chunks(source_type);
 
+        -- content/title/author 存 jieba 预分词后的空格分隔词序列，
+        -- 使 FTS5 能做中文词级别匹配（"宁德时代" → "宁德 时代"）
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts
         USING fts5(id UNINDEXED, content, title, author, tokenize='unicode61');
     """)
@@ -124,7 +126,7 @@ def ingest_text(
         )
         db.execute(
             "INSERT INTO chunks_fts (id,content,title,author) VALUES (?,?,?,?)",
-            (cid, chunk, title, author),
+            (cid, _tok_fts(chunk), _tok_fts(title), _tok_fts(author)),
         )
         added += 1
     db.commit()
@@ -176,9 +178,12 @@ def ingest_pdf(
     title: str = "",
     author: str = "",
     source_id: Optional[str] = None,
+    pages_per_batch: int = 10,
 ) -> int:
     """
-    解析 PDF 并入库。每页作为独立文本段落，再按 CHUNK_SIZE 分块。
+    解析 PDF 并入库。逐批（pages_per_batch 页）处理，peak 内存 = 单批文本大小，
+    与 PDF 总页数无关。每个 chunk 的 extra_meta 记录起始页码，方便引用。
+
     依赖 pypdf（pip install pypdf），纯 Python，Python 3.14 兼容。
     """
     try:
@@ -192,35 +197,48 @@ def ingest_pdf(
         raise FileNotFoundError(path)
 
     reader = PdfReader(str(p))
+    total_pages = len(reader.pages)
 
-    # 尝试从 PDF 元数据补全标题/作者
-    meta = reader.metadata or {}
+    # 从 PDF 元数据补全标题/作者
+    pdf_meta = reader.metadata or {}
     if not title:
-        title = str(meta.get("/Title", p.stem)).strip() or p.stem
+        title = str(pdf_meta.get("/Title", p.stem)).strip() or p.stem
     if not author:
-        author = str(meta.get("/Author", "")).strip()
-
-    # 提取全文（按页拼接，保留段落分隔）
-    pages = []
-    for page in reader.pages:
-        text = page.extract_text() or ""
-        text = text.strip()
-        if text:
-            pages.append(text)
-
-    full_text = "\n\n".join(pages)
-    if not full_text.strip():
-        return 0
+        author = str(pdf_meta.get("/Author", "")).strip()
 
     sid = source_id or f"pdf:{p.name}"
-    return ingest_text(
-        text=full_text,
-        source_id=sid,
-        source_type="pdf",
-        title=title,
-        author=author,
-        extra_meta={"path": str(p.resolve()), "pages": len(reader.pages)},
-    )
+    added = 0
+
+    # 逐批处理：每批 pages_per_batch 页，避免将全文一次性载入内存
+    for batch_start in range(0, total_pages, pages_per_batch):
+        batch_end = min(batch_start + pages_per_batch, total_pages)
+        batch_texts = []
+        for i in range(batch_start, batch_end):
+            text = (reader.pages[i].extract_text() or "").strip()
+            if text:
+                batch_texts.append(text)
+
+        batch_text = "\n\n".join(batch_texts)
+        if not batch_text.strip():
+            continue
+
+        # source_id 带页范围，使同一批次可独立去重
+        batch_sid = f"{sid}:p{batch_start+1}-{batch_end}"
+        added += ingest_text(
+            text=batch_text,
+            source_id=batch_sid,
+            source_type="pdf",
+            title=title,
+            author=author,
+            extra_meta={
+                "path":        str(p.resolve()),
+                "total_pages": total_pages,
+                "page_start":  batch_start + 1,
+                "page_end":    batch_end,
+            },
+        )
+
+    return added
 
 
 def ingest_pdf_dir(directory: str, recursive: bool = False) -> dict:
@@ -248,16 +266,20 @@ def ingest_pdf_dir(directory: str, recursive: bool = False) -> dict:
 # ── BM25 检索 ─────────────────────────────────────────────────────────────────
 
 def _tokenize(text: str) -> list[str]:
-    """jieba 分词，合并单字为双字以提升精度。"""
+    """jieba 分词，返回 token 列表（用于 BM25）。"""
     try:
         import jieba
         tokens = list(jieba.cut(text))
     except ImportError:
-        # 退回按字分割
         tokens = list(text)
-    # 过滤空格/标点
-    tokens = [t.strip() for t in tokens if t.strip() and len(t.strip()) > 0]
-    return tokens
+    return [t.strip() for t in tokens if t.strip()]
+
+
+def _tok_fts(text: str) -> str:
+    """将文本转为空格分隔的 jieba token 串，写入 FTS5 使其做词级别匹配。"""
+    tokens = _tokenize(text)
+    # 长度 ≥2 的词保留；单字也保留（用于数字/英文字母）
+    return " ".join(tokens) if tokens else text
 
 
 _BM25_PREFILTER = 200   # FTS5 先召回多少候选再交给 BM25 精排
@@ -318,7 +340,12 @@ def retrieve_fts(query: str, top_k: int = TOP_K_BM25,
                  source_type: Optional[str] = None) -> list[dict]:
     """SQLite FTS5 全文检索（BM25 降级备用）。"""
     db = _db()
-    safe_q = re.sub(r'["\'\*\-\+\(\)]', ' ', query)
+    # FTS5 表里存的是 jieba 分词串，查询时也要分词后再做 OR 匹配
+    tokens = _tokenize(query)
+    if tokens:
+        safe_q = " OR ".join(re.sub(r'["\'\*\-\+\(\)]', '', t) for t in tokens if t)
+    else:
+        safe_q = re.sub(r'["\'\*\-\+\(\)]', ' ', query)
     try:
         if source_type:
             rows = db.execute(
@@ -453,9 +480,14 @@ def ask(
     )
     answer = msg.content[0].text.strip()
     sources = [
-        {"title": h["meta"].get("title", ""), "score": h["score"],
-         "source_type": h["meta"].get("source_type", ""),
-         "url": h["meta"].get("url", "")}
+        {
+            "title":       h["meta"].get("title", ""),
+            "score":       h["score"],
+            "source_type": h["meta"].get("source_type", ""),
+            "url":         h["meta"].get("url", ""),
+            "page_start":  h["meta"].get("page_start"),
+            "page_end":    h["meta"].get("page_end"),
+        }
         for h in hits
     ]
     return {"answer": answer, "sources": sources}

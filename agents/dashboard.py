@@ -304,9 +304,11 @@ import sys as _sys
 _sys.path.insert(0, str(ROOT))
 
 _rag_state = {
-    "status": "idle",      # idle | running | done | error
-    "log":    [],          # 日志行列表
-    "stats":  {},          # 最新统计
+    "status":  "idle",     # idle | running | done | error
+    "log":     [],         # 日志行列表
+    "stats":   {},         # 最新统计
+    "total":   0,          # 本次任务总数
+    "current": 0,          # 已处理数
 }
 _rag_lock = threading.Lock()
 
@@ -316,6 +318,13 @@ def _rag_log(msg: str):
         _rag_state["log"].append(msg)
         if len(_rag_state["log"]) > 500:
             _rag_state["log"] = _rag_state["log"][-500:]
+
+
+def _rag_progress(current: int, total: int):
+    with _rag_lock:
+        _rag_state["current"] = current
+        _rag_state["total"] = total
+        _rag_state["log"].append(f"__progress__:{current}/{total}")
 
 
 def _rag_stats() -> dict:
@@ -356,19 +365,22 @@ def _do_ingest_dir(directory: Path, recursive: bool = False):
         return
     ok = skipped = 0
     failed = []
-    for pdf in pdfs:
+    total = len(pdfs)
+    _rag_progress(0, total)
+    for idx, pdf in enumerate(pdfs, 1):
         try:
             from x_agent.rag import ingest_pdf
             n = ingest_pdf(str(pdf))
             if n > 0:
                 ok += 1
-                _rag_log(f"  ✅ {pdf.name}  新增 {n} 块")
+                _rag_log(f"  ✅ [{idx}/{total}] {pdf.name}  新增 {n} 块")
             else:
                 skipped += 1
-                _rag_log(f"  ⏭ {pdf.name}  已入库，跳过")
+                _rag_log(f"  ⏭ [{idx}/{total}] {pdf.name}  已入库，跳过")
         except Exception as e:
             failed.append(pdf.name)
-            _rag_log(f"  ❌ {pdf.name}  {e}")
+            _rag_log(f"  ❌ [{idx}/{total}] {pdf.name}  {e}")
+        _rag_progress(idx, total)
     _rag_log(f"完成：入库 {ok} 本 / 跳过 {skipped} 本 / 失败 {len(failed)} 本")
     _rag_state["stats"] = _rag_stats()
     _rag_state["status"] = "done" if not failed else "error"
@@ -630,6 +642,8 @@ def rag_stats():
     return {
         "stats":      stats,
         "rag_status": _rag_state["status"],
+        "rag_current": _rag_state["current"],
+        "rag_total":   _rag_state["total"],
         "books_dir":  str(BOOKS_DIR),
         "books_pdfs": books_dir_files,
         "log":        _rag_state["log"][-50:],
@@ -1107,6 +1121,18 @@ textarea:focus { border-color:#3b82f6; }
       <div class="rag-log" id="bdu-log" style="margin-top:10px"><span style="color:#475569">等待同步...</span></div>
     </div>
 
+    <!-- 进度条（批量入库时显示） -->
+    <div id="rag-progress-wrap" style="display:none;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:#64748b;margin-bottom:4px">
+        <span>入库进度</span>
+        <span id="rag-progress-label">0 / 0</span>
+      </div>
+      <div style="background:#1e293b;border-radius:6px;height:8px;overflow:hidden">
+        <div id="rag-progress-bar"
+             style="height:100%;width:0%;background:linear-gradient(90deg,#6366f1,#4ade80);border-radius:6px;transition:width 0.3s ease"></div>
+      </div>
+    </div>
+
     <!-- 本地入库日志 -->
     <div class="rag-log" id="rag-log"><span style="color:#475569">等待操作...</span></div>
   </div>
@@ -1287,9 +1313,32 @@ function updateRagBadge(status) {
   document.getElementById('drop-zone').style.pointerEvents = busy ? 'none' : '';
 }
 
+function updateRagProgress(current, total) {
+  const wrap  = document.getElementById('rag-progress-wrap');
+  const bar   = document.getElementById('rag-progress-bar');
+  const label = document.getElementById('rag-progress-label');
+  if (total <= 0) { wrap.style.display = 'none'; return; }
+  wrap.style.display = 'block';
+  const pct = Math.round(current / total * 100);
+  bar.style.width = pct + '%';
+  label.textContent = `${current} / ${total}`;
+  if (current >= total) {
+    setTimeout(() => { wrap.style.display = 'none'; }, 3000);
+  }
+}
+
 function appendRagLog(line) {
   if (line.startsWith('__status__:')) {
-    updateRagBadge(line.slice(11));
+    const status = line.slice(11);
+    updateRagBadge(status);
+    if (status === 'idle' || status === 'done' || status === 'error') {
+      updateRagProgress(0, 0);
+    }
+    return;
+  }
+  if (line.startsWith('__progress__:')) {
+    const [cur, tot] = line.slice(13).split('/').map(Number);
+    updateRagProgress(cur, tot);
     return;
   }
   const el = document.getElementById('rag-log');
@@ -1372,6 +1421,7 @@ async function ragIngestDir(recursive) {
   startRagLogStream();
   document.getElementById('rag-log').innerHTML = '';
   updateRagBadge('running');
+  updateRagProgress(0, 0);
   const r = await fetch(`/api/rag/ingest-dir?recursive=${recursive}`, {method:'POST'});
   if (!r.ok) {
     const d = await r.json();

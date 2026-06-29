@@ -101,16 +101,28 @@ def _psych_section(store) -> list:
     )
 
     llm = latest.get("llm_report") or {}
-    if llm.get("market_phase"):
-        lines.append(f"\n**市场阶段**：{llm['market_phase']}")
-    if llm.get("crowd_psychology"):
-        lines.append(f"\n> {llm['crowd_psychology']}")
-    if llm.get("key_drivers"):
-        lines.append("\n**情绪驱动因素**：" + "、".join(llm["key_drivers"]))
-    if llm.get("contrarian_rationale"):
-        lines.append(f"\n**逆向逻辑**：{llm['contrarian_rationale']}")
-    if llm.get("risk_warning"):
-        lines.append(f"\n**风险提示**：{llm['risk_warning']}")
+    if not llm:
+        lines.append("\n*（LLM 解读未启用，在 config.yaml 设置 psych.use_llm: true 开启）*")
+    if llm:
+        sentiment_cn = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}.get(
+            llm.get("sentiment", ""), ""
+        )
+        confidence_cn = {"high": "高", "medium": "中", "low": "低"}.get(
+            llm.get("confidence", ""), ""
+        )
+        if llm.get("market_phase"):
+            suffix = f"  （置信：{confidence_cn}）" if confidence_cn else ""
+            lines.append(f"\n**市场阶段**：{llm['market_phase']}  逆向倾向：{sentiment_cn}{suffix}")
+        if llm.get("crowd_psychology"):
+            lines.append(f"\n> {llm['crowd_psychology']}")
+        if llm.get("key_drivers"):
+            lines.append("\n**情绪驱动**：" + "、".join(llm["key_drivers"]))
+        if llm.get("contrarian_rationale"):
+            lines.append(f"\n**逆向逻辑**：{llm['contrarian_rationale']}")
+        if llm.get("short_term_outlook"):
+            lines.append(f"\n**24-48h 展望**：{llm['short_term_outlook']}")
+        if llm.get("risk_warning"):
+            lines.append(f"\n**风险提示**：{llm['risk_warning']}")
 
     if len(snapshots) > 1:
         lines.append("\n**历史趋势**（最近 5 次）：")
@@ -126,6 +138,78 @@ def _psych_section(store) -> list:
             )
             lines.append(f"| {t} | {s['panic_score']:.0f} | {em} | {sig} |")
 
+    lines.append("")
+    return lines
+
+
+def _tgb_section(store, limit: int = 20) -> list:
+    """生成淘股吧大V帖子 + 评论板块。"""
+    try:
+        rows = store.conn.execute(
+            "SELECT author, text, url, created_at, group_tag "
+            "FROM tweets WHERE source='taoguba' "
+            "ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    except Exception:
+        return []
+    if not rows:
+        return []
+
+    posts   = [(a, t, u, c) for a, t, u, c, g in rows if g == "taoguba"]
+    replies = [(a, t, u, c) for a, t, u, c, g in rows if g == "taoguba_reply"]
+
+    lines = ["## 📝 淘股吧动态", ""]
+
+    if posts:
+        lines.append(f"### 博文（{len(posts)} 篇）")
+        lines.append("")
+        for author, text, url, created_at in posts[:10]:
+            ts = (created_at or "")[:16].replace("T", " ")
+            # 取标题行（第一行）和正文摘要
+            title_line = text.split("\n")[0][:80]
+            lines.append(f"- **{author}** · {ts}")
+            lines.append(f"  > {title_line}")
+            if url:
+                lines.append(f"  - {url}")
+        lines.append("")
+
+    if replies:
+        lines.append(f"### 评论/回复（{len(replies)} 条）")
+        lines.append("")
+        for author, text, url, created_at in replies[:10]:
+            ts = (created_at or "")[:16].replace("T", " ")
+            # text 格式：[评论]原文标题\n评论内容
+            summary = text.replace("[评论]", "→ ").strip()[:200]
+            lines.append(f"- **{author}** · {ts}")
+            lines.append(f"  > {summary}")
+            if url:
+                lines.append(f"  - {url}")
+        lines.append("")
+
+    return lines
+
+
+def _rag_section() -> list:
+    """显示 RAG 知识库入库统计。"""
+    try:
+        from x_agent.rag import collection_stats
+        stats = collection_stats()
+    except Exception:
+        return []
+    if stats.get("total_chunks", 0) == 0:
+        return []
+
+    by_type = stats.get("by_type", {})
+    lines = ["## 📚 知识库状态", ""]
+    lines.append(f"共 **{stats['total_chunks']}** 个知识块  |  书籍 **{stats['book_count']}** 本")
+    lines.append("")
+    lines.append("| 类型 | 块数 |")
+    lines.append("| ---- | ---: |")
+    type_cn = {"book": "微信读书", "pdf": "PDF 文档", "article": "文章",
+                "report": "研报", "other": "其他"}
+    for t, n in sorted(by_type.items(), key=lambda x: x[1], reverse=True):
+        lines.append(f"| {type_cn.get(t, t)} | {n} |")
     lines.append("")
     return lines
 
@@ -220,6 +304,9 @@ def build_digest(store, path: str) -> str:
     lines += _market_section(store, "crypto",    "加密货币")
     lines += _market_section(store, "index",     "全球指数")
 
+    # ── 淘股吧大V动态板块 ──
+    lines += _tgb_section(store)
+
     # ── 因子收益率板块 ──
     lines += _factor_section(store)
 
@@ -228,6 +315,9 @@ def build_digest(store, path: str) -> str:
 
     # ── 市场心理板块 ──
     lines += _psych_section(store)
+
+    # ── RAG 知识库状态 ──
+    lines += _rag_section()
 
     out = "\n".join(lines)
     with open(path, "w", encoding="utf-8") as f:

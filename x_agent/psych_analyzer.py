@@ -182,44 +182,76 @@ class PsychAnalyzer:
 
     def run_llm_synthesis(self, panic_data: dict, llm_client, model: str) -> dict:
         """
-        将 Panic Index 数据和样本帖子发给 Claude，获取心理解读报告。
-        返回合并后的 dict（原 panic_data + llm 字段）。
+        三层架构第三层：把 Panic Index 数据 + 样本帖 + 行情动量交给 Claude，
+        强制输出 JSON，包含 sentiment（bullish/neutral/bearish）+ 心理解读 + 逆向逻辑。
         """
-        sample_fear  = [p["text"][:200] for p in panic_data.get("top_fear_posts",  [])[:3]]
-        sample_greed = [p["text"][:200] for p in panic_data.get("top_greed_posts", [])[:3]]
+        score   = panic_data["panic_score"]
+        lookback = panic_data["lookback_hours"]
 
-        prompt = f"""你是一位市场心理学专家，专门研究群体行为与市场情绪。
+        # 情绪等级映射（对应 bullish/neutral/bearish 三档）
+        if score >= 70:
+            overall_sentiment = "bearish"     # 极度恐慌 → 逆向bullish机会
+            contrarian_bias   = "bullish"
+        elif score <= 30:
+            overall_sentiment = "bullish"     # 极度贪婪 → 逆向bearish风险
+            contrarian_bias   = "bearish"
+        else:
+            overall_sentiment = "neutral"
+            contrarian_bias   = "neutral"
 
-当前市场数据（过去 {panic_data['lookback_hours']} 小时）：
-- Panic Index: {panic_data['panic_score']}/100（0=极度贪婪，100=极度恐慌）
-- 恐慌信号帖: {panic_data['fear_count']} 条 / 贪婪信号帖: {panic_data['greed_count']} 条
-- 价格动量调整: {panic_data['price_adjustment']:+.1f}
-- 逆向信号: {panic_data['contrarian_signal']}
+        # 样本帖（恐慌/贪婪各最多5条，取最高分的）
+        fear_samples  = panic_data.get("top_fear_posts",  [])[:5]
+        greed_samples = panic_data.get("top_greed_posts", [])[:5]
 
-典型恐慌帖（摘录）：
-{chr(10).join(f'  - {t}' for t in sample_fear) or '  （无）'}
+        def _fmt_posts(posts):
+            if not posts:
+                return "  （无典型帖子）"
+            return "\n".join(
+                f"  [{i+1}] {p['text'][:180].replace(chr(10), ' ')}"
+                for i, p in enumerate(posts)
+            )
 
-典型贪婪帖（摘录）：
-{chr(10).join(f'  - {t}' for t in sample_greed) or '  （无）'}
+        system = (
+            "你是一位专注加密货币与A股市场的量化心理学分析师。"
+            "基于群体情绪数据和社交帖子，输出结构化市场信号。"
+            "只输出 JSON，不要任何解释性文字或 markdown fence。"
+        )
 
-请用中文输出严格 JSON，格式如下（不要输出任何其他内容）：
+        user = f"""## 市场情绪快照（过去 {lookback} 小时）
+
+Panic Index: {score:.1f}/100  （0=极度贪婪，100=极度恐慌）
+整体情绪倾向: {overall_sentiment}  逆向信号方向: {contrarian_bias}
+恐慌帖数: {panic_data['fear_count']}  贪婪帖数: {panic_data['greed_count']}  总扫描: {panic_data['total_posts']}
+价格动量修正: {panic_data['price_adjustment']:+.1f} 分
+
+### 典型恐慌帖（权重最高）
+{_fmt_posts(fear_samples)}
+
+### 典型贪婪帖（权重最高）
+{_fmt_posts(greed_samples)}
+
+---
+输出 JSON，严格遵守以下 schema，字段均用中文填写：
 {{
-  "market_phase": "极度恐慌|恐慌|谨慎|中性|乐观|贪婪|极度贪婪",
-  "crowd_psychology": "一段话描述当前群体心理状态（50字以内）",
-  "key_drivers": ["驱动情绪的2-3个核心因素"],
-  "contrarian_rationale": "逆向操作逻辑（30字以内）",
-  "risk_warning": "当前最大风险点（30字以内）",
-  "short_term_outlook": "short_term outlook in 24-48h（中文，30字以内）"
+  "sentiment": "{overall_sentiment}",
+  "contrarian_signal": "{contrarian_bias}",
+  "market_phase": "极度恐慌|恐慌|谨慎|中性|乐观|贪婪|极度贪婪 之一",
+  "crowd_psychology": "描述当前群体心理（≤60字）",
+  "key_drivers": ["情绪主因1", "情绪主因2"],
+  "contrarian_rationale": "逆向操作逻辑（≤40字）",
+  "risk_warning": "最大尾部风险（≤40字）",
+  "short_term_outlook": "未来24-48小时展望（≤40字）",
+  "confidence": "high|medium|low"
 }}"""
 
         try:
             resp = llm_client.messages.create(
                 model=model,
-                max_tokens=512,
-                messages=[{"role": "user", "content": prompt}],
+                max_tokens=600,
+                system=system,
+                messages=[{"role": "user", "content": user}],
             )
             raw = resp.content[0].text.strip()
-            # 提取 JSON（容错：LLM 有时多输出 markdown fence）
             m = re.search(r"\{[\s\S]+\}", raw)
             llm_json = json.loads(m.group(0)) if m else {}
         except Exception as e:

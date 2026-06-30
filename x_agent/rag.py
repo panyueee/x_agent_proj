@@ -27,11 +27,15 @@ from typing import Optional
 
 # ── 常量 ─────────────────────────────────────────────────────────────────────
 
-RAG_DB_PATH  = os.getenv("RAG_DB_PATH", "./output/rag.db")
-CHUNK_SIZE   = 500     # 字符数
-CHUNK_OVERLAP = 50
-TOP_K_BM25   = 20     # BM25 候选数（再由 Claude 重排到 top_k）
-TOP_K        = 6      # 默认返回条数
+RAG_DB_PATH    = os.getenv("RAG_DB_PATH", "./output/rag.db")
+LANCE_DB_PATH  = os.getenv("LANCE_DB_PATH", "./output/rag_vectors")
+CHUNK_SIZE     = 500     # 字符数
+CHUNK_OVERLAP  = 50
+TOP_K_BM25     = 20     # BM25 候选数（再由 Claude 重排到 top_k）
+TOP_K_VECTOR   = 20     # 向量检索候选数
+TOP_K          = 6      # 默认返回条数
+VOYAGE_MODEL   = "voyage-finance-2"
+VOYAGE_BATCH   = 128    # Voyage API 单批最大条数
 
 
 # ── SQLite 初始化 ─────────────────────────────────────────────────────────────
@@ -76,19 +80,26 @@ def _db() -> sqlite3.Connection:
 def split_text(text: str, chunk_size: int = CHUNK_SIZE,
                overlap: int = CHUNK_OVERLAP) -> list[str]:
     text = re.sub(r"\n{3,}", "\n\n", text.strip())
+    n = len(text)
     chunks, start = [], 0
-    while start < len(text):
-        end = min(start + chunk_size, len(text))
-        if end < len(text):
+    min_chunk = chunk_size // 2   # 分隔符回退切出的块不得小于此值，否则宁可硬切
+    while start < n:
+        end = min(start + chunk_size, n)
+        if end < n:
+            # 在窗口内寻找分隔符断点；只接受不会把块切得过小的断点，
+            # 避免窗口前部一个孤立 \n\n 导致切出碎块、再逐字符碾压。
             for sep in ("。", "！", "？", "\n\n", "\n", "；"):
                 pos = text.rfind(sep, start, end)
-                if pos != -1:
+                if pos != -1 and (pos + 1 - start) >= min_chunk:
                     end = pos + 1
                     break
         chunk = text[start:end].strip()
         if chunk:
             chunks.append(chunk)
-        start = end - overlap if end < len(text) else len(text)
+        if end >= n:   # 已到文末即停，否则会多切一个 overlap 长度的重复尾块
+            break
+        # 推进：保留 overlap，但绝不后退或停滞（end 恒 > start）
+        start = end - overlap if end - overlap > start else end
     return chunks
 
 
@@ -108,29 +119,55 @@ def ingest_text(
     extra_meta: Optional[dict] = None,
     chunk_size: int = CHUNK_SIZE,
     overlap: int = CHUNK_OVERLAP,
+    skip_vectors: bool = False,
 ) -> int:
     """将文本分块后写入 SQLite，返回新增块数。"""
     db = _db()
     chunks = split_text(text, chunk_size, overlap)
-    added = 0
+    if not chunks:
+        return 0
+
+    # 批量查已存在的 id（1次查询代替 N 次）
+    cids = [_doc_id(source_id, i) for i in range(len(chunks))]
+    placeholders = ",".join("?" * len(cids))
+    existing = {r[0] for r in db.execute(
+        f"SELECT id FROM chunks WHERE id IN ({placeholders})", cids
+    ).fetchall()}
+
+    # title/author 只分词一次
+    tok_title  = _tok_fts(title)
+    tok_author = _tok_fts(author)
+    meta_json  = json.dumps(extra_meta or {}, ensure_ascii=False)
+
+    new_chunks: list[tuple[str, str]] = []  # (cid, content) 用于后续向量写入
     for i, chunk in enumerate(chunks):
-        cid = _doc_id(source_id, i)
-        exists = db.execute("SELECT 1 FROM chunks WHERE id=?", (cid,)).fetchone()
-        if exists:
+        cid = cids[i]
+        if cid in existing:
             continue
         db.execute(
             "INSERT INTO chunks (id,source_id,source_type,title,author,chunk_idx,total_chunks,content,extra_meta) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
             (cid, source_id, source_type, title[:200], author[:100],
-             i, len(chunks), chunk, json.dumps(extra_meta or {}, ensure_ascii=False)),
+             i, len(chunks), chunk, meta_json),
         )
         db.execute(
             "INSERT INTO chunks_fts (id,content,title,author) VALUES (?,?,?,?)",
-            (cid, _tok_fts(chunk), _tok_fts(title), _tok_fts(author)),
+            (cid, _tok_fts(chunk), tok_title, tok_author),
         )
-        added += 1
+        new_chunks.append((cid, chunk))
+
     db.commit()
-    return added
+
+    # 向量写入：直接用内存里的 chunks，不再回查 SQLite
+    if new_chunks and not skip_vectors:
+        upsert_vectors(
+            chunk_ids    = [c[0] for c in new_chunks],
+            texts        = [c[1] for c in new_chunks],
+            source_types = [source_type] * len(new_chunks),
+            titles       = [title] * len(new_chunks),
+        )
+
+    return len(new_chunks)
 
 
 def ingest_book(
@@ -173,6 +210,164 @@ def ingest_article(
     )
 
 
+def _ingest_scanned_pdf_streaming(
+    path,
+    sid: str,
+    file_hash: str,
+    total_pages: int,
+    title: str,
+    author: str,
+    source_type: str,
+    pages_per_batch: int = 10,
+    dpi: int = 100,
+    ocr_batch_size: int = 50,
+    skip_vectors: bool = True,
+) -> int:
+    """
+    扫描版两步入库，彻底解耦 Vision 和 jieba：
+
+    Step 1 — 分批起 OCR 子进程（每批 ocr_batch_size 页），每批处理完立即退出，
+             Vision 内存在批次间完全释放；各批结果追加写入同一临时 JSONL 文件。
+    Step 2 — 所有 OCR 子进程退出后，主进程读 JSONL，jieba 分词写 SQLite。
+
+    内存峰值 = max(单批 Vision子进程 ~500MB, jieba写库 ~200MB)，两者永不共存。
+    """
+    import subprocess
+    import sys
+    import tempfile
+    from pathlib import Path as _Path
+
+    worker = _Path(__file__).parent.parent / "scripts" / "ocr_worker.py"
+    if not worker.exists():
+        raise FileNotFoundError(f"OCR worker 不存在: {worker}")
+
+    # OCR 缓存文件按 file_hash 持久化，中途 kill 后可断点续传
+    cache_dir = _Path(RAG_DB_PATH).parent / "ocr_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = str(cache_dir / f"{file_hash}.jsonl")
+
+    # ── Step 1: 分批 OCR，追加写 JSONL（已有缓存则跳过）────────────────────────
+    cached_pages: set[int] = set()
+    if _Path(tmp_path).exists():
+        with open(tmp_path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    cached_pages.add(json.loads(line.strip())["page"])
+                except Exception:
+                    pass
+
+    remaining_batches = [
+        (b, min(b + ocr_batch_size, total_pages))
+        for b in range(0, total_pages, ocr_batch_size)
+        if not all(p in cached_pages for p in range(b, min(b + ocr_batch_size, total_pages)))
+    ]
+
+    if remaining_batches:
+        print(f"[rag] Step1: OCR {total_pages} 页，每批 {ocr_batch_size} 页"
+              + (f"（跳过已缓存 {len(cached_pages)} 页）" if cached_pages else ""))
+        try:
+            with open(tmp_path, "a", encoding="utf-8") as fout:
+                for b_start, b_end in remaining_batches:
+                    print(f"[rag] OCR 子进程 p{b_start+1}-{b_end} 启动...")
+                    # stderr 写临时文件，避免管道缓冲满导致父子进程死锁
+                    err_fd, err_path = tempfile.mkstemp(suffix=".err")
+                    try:
+                        with os.fdopen(err_fd, "w") as ferr:
+                            proc = subprocess.Popen(
+                                [sys.executable, str(worker), str(path),
+                                 str(dpi), str(b_start), str(b_end)],
+                                stdout=subprocess.PIPE,
+                                stderr=ferr,
+                                text=True,
+                                bufsize=1,
+                            )
+                            for line in proc.stdout:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                try:
+                                    obj = json.loads(line)
+                                    pg  = obj.get("page", -1)
+                                    if pg >= 0:
+                                        if obj.get("text"):
+                                            print(f"[rag] OCR p{pg+1} {len(obj['text'])}字")
+                                        fout.write(line + "\n")
+                                except json.JSONDecodeError:
+                                    pass
+                            proc.wait()
+                        if proc.returncode != 0:
+                            err_txt = open(err_path).read()
+                            print(f"[rag] OCR 子进程异常(p{b_start+1}-{b_end}): {err_txt[:200]}")
+                        else:
+                            print(f"[rag] OCR 子进程 p{b_start+1}-{b_end} 完成退出")
+                    finally:
+                        _Path(err_path).unlink(missing_ok=True)
+                    fout.flush()
+        except Exception as e:
+            print(f"[rag] OCR Step1 失败: {e}")
+            return 0
+    else:
+        print(f"[rag] Step1: 全部 {total_pages} 页已有缓存，跳过 OCR")
+
+    print("[rag] Step1 全部完成，Vision 内存已释放")
+
+    # ── Step 2: 读 JSONL，jieba 分词写 SQLite ────────────────────────────────
+    print("[rag] Step2: jieba 分词写库...")
+    added       = 0
+    batch_texts: list[str] = []
+    batch_start = 0
+
+    def _flush(b_end: int) -> None:
+        nonlocal added, batch_start
+        if not batch_texts:
+            return
+        batch_sid = f"{sid}:p{batch_start+1}-{b_end}"
+        n = ingest_text(
+            text="\n\n".join(batch_texts),
+            source_id=batch_sid,
+            source_type=source_type,
+            title=title,
+            author=author,
+            extra_meta={
+                "path":        str(path),
+                "filename":    _Path(path).name,
+                "file_hash":   file_hash,
+                "total_pages": total_pages,
+                "page_start":  batch_start + 1,
+                "page_end":    b_end,
+            },
+            skip_vectors=skip_vectors,  # 向量留给 embed-all 单独跑，避免内存叠加
+        )
+        added += n
+        print(f"[rag] 写库 p{batch_start+1}-{b_end}，累计 {added} 块")
+
+    with open(tmp_path, encoding="utf-8") as fin:
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj  = json.loads(line)
+                pg   = obj.get("page", -1)
+                text = obj.get("text", "").strip()
+            except json.JSONDecodeError:
+                continue
+            if pg < 0:
+                continue
+            if text:
+                batch_texts.append(text)
+            if (pg - batch_start + 1) >= pages_per_batch:
+                _flush(pg + 1)
+                batch_texts = []
+                batch_start = pg + 1
+        _flush(total_pages)
+
+    # OCR 缓存按 file_hash 持久化保留，不删除：
+    # 换分块策略 / 换 embedding 模型时可直接复用，无需重跑 Vision OCR。
+    print(f"[rag] OCR 缓存保留于 {tmp_path}")
+    return added
+
+
 def ingest_pdf(
     path: str,
     title: str = "",
@@ -180,12 +375,13 @@ def ingest_pdf(
     source_id: Optional[str] = None,
     pages_per_batch: int = 10,
     source_type: str = "pdf",
+    use_ocr: bool = True,
+    skip_vectors: bool = False,
 ) -> int:
     """
-    解析 PDF 并入库。逐批（pages_per_batch 页）处理，peak 内存 = 单批文本大小，
-    与 PDF 总页数无关。每个 chunk 的 extra_meta 记录起始页码，方便引用。
-
-    依赖 pypdf（pip install pypdf），纯 Python，Python 3.14 兼容。
+    解析 PDF 并入库。逐批（pages_per_batch 页）处理，peak 内存 = 单批文本大小。
+    扫描版走流式 OCR（每批页数写完立即释放），文本版走 pypdf 批量提取。
+    skip_vectors=True 时只写 SQLite/FTS，向量留给 embed-all 统一生成。
     """
     try:
         from pypdf import PdfReader
@@ -197,44 +393,64 @@ def ingest_pdf(
     if not p.exists():
         raise FileNotFoundError(path)
 
-    # 用文件内容 MD5 作为 source_id，文件名改变也不会重复入库
-    file_hash = hashlib.md5(p.read_bytes()).hexdigest()[:16]
+    # 分块计算 MD5，避免把整个大文件载入内存
+    _md5 = hashlib.md5()
+    with open(p, "rb") as _f:
+        for _chunk in iter(lambda: _f.read(1 << 20), b""):
+            _md5.update(_chunk)
+    file_hash = _md5.hexdigest()[:16]
     sid = source_id or f"pdf:{file_hash}"
 
-    # 书级别预检：只要有任意一块已入库就跳过整本
     db = _db()
-    already = db.execute(
-        "SELECT COUNT(*) FROM chunks WHERE source_id LIKE ?", (sid + "%",)
-    ).fetchone()[0]
-    if already > 0:
-        return 0
 
     reader = PdfReader(str(p))
     total_pages = len(reader.pages)
 
-    # 从 PDF 元数据补全标题/作者
     pdf_meta = reader.metadata or {}
     if not title:
         title = str(pdf_meta.get("/Title", p.stem)).strip() or p.stem
     if not author:
         author = str(pdf_meta.get("/Author", "")).strip()
 
-    added = 0
+    # 检测扫描版（前5页全部无文字）
+    sample_texts = [(reader.pages[i].extract_text() or "").strip()
+                    for i in range(min(5, total_pages))]
+    is_scanned = use_ocr and not any(sample_texts)
 
-    # 逐批处理：每批 pages_per_batch 页，避免将全文一次性载入内存
+    if is_scanned:
+        # 扫描版交给流式 OCR：它自身可断点续传（OCR 缓存 + ingest_text 去重），
+        # 故此处不按 already>0 早返回——否则中途中断过的书会永远补不全剩余页。
+        print(f"[rag] 扫描版 PDF（{total_pages} 页），启动流式 OCR...")
+        del reader  # 扫描版不再需要 reader，提前释放内存
+        return _ingest_scanned_pdf_streaming(
+            path=str(p), sid=sid, file_hash=file_hash,
+            total_pages=total_pages, title=title, author=author,
+            source_type=source_type, pages_per_batch=pages_per_batch,
+            skip_vectors=skip_vectors,
+        )
+
+    # 文本版：已全部入库则快速跳过（文本提取本身无断点续传需求）
+    already = db.execute(
+        "SELECT COUNT(*) FROM chunks WHERE source_id LIKE ?", (sid + "%",)
+    ).fetchone()[0]
+    if already > 0:
+        return 0
+
+    # 文本版：pypdf 逐批提取
+    added = 0
     for batch_start in range(0, total_pages, pages_per_batch):
-        batch_end = min(batch_start + pages_per_batch, total_pages)
+        batch_end   = min(batch_start + pages_per_batch, total_pages)
         batch_texts = []
         for i in range(batch_start, batch_end):
             text = (reader.pages[i].extract_text() or "").strip()
             if text:
                 batch_texts.append(text)
 
-        batch_text = "\n\n".join(batch_texts)
+        batch_text  = "\n\n".join(batch_texts)
+        batch_texts = None
         if not batch_text.strip():
             continue
 
-        # source_id 带页范围，使同一批次可独立去重
         batch_sid = f"{sid}:p{batch_start+1}-{batch_end}"
         added += ingest_text(
             text=batch_text,
@@ -250,6 +466,7 @@ def ingest_pdf(
                 "page_start":  batch_start + 1,
                 "page_end":    batch_end,
             },
+            skip_vectors=skip_vectors,
         )
 
     return added
@@ -275,6 +492,217 @@ def ingest_pdf_dir(directory: str, recursive: bool = False) -> dict:
             print(f"[rag] PDF 入库失败 {pdf.name}: {e}")
             failed.append(str(pdf))
     return {"ok": ok, "skipped": skipped, "failed": failed}
+
+
+# ── Voyage AI Embedding ───────────────────────────────────────────────────────
+
+def _voyage_client():
+    """返回 voyageai.Client 单例（线程安全，懒初始化）。"""
+    if not hasattr(_local, "voyage"):
+        api_key = os.getenv("VOYAGE_API_KEY", "")
+        if not api_key:
+            _local.voyage = None
+            return None
+        try:
+            import voyageai
+            _local.voyage = voyageai.Client(api_key=api_key)
+        except ImportError:
+            _local.voyage = None
+    return _local.voyage
+
+
+def embed_texts(texts: list[str]) -> list[list[float]] | None:
+    """
+    调用 Voyage AI 批量生成 embedding。texts 可任意长，内部自动分批。
+    返回 None 表示 Voyage 不可用（VOYAGE_API_KEY 未设置或未安装 voyageai）。
+    """
+    client = _voyage_client()
+    if client is None:
+        return None
+
+    all_embeddings = []
+    for i in range(0, len(texts), VOYAGE_BATCH):
+        batch = texts[i: i + VOYAGE_BATCH]
+        try:
+            result = client.embed(batch, model=VOYAGE_MODEL, input_type="document")
+            all_embeddings.extend(result.embeddings)
+        except Exception as e:
+            print(f"[rag] Voyage embed 失败: {e}")
+            return None
+    return all_embeddings
+
+
+def embed_query(query: str) -> list[float] | None:
+    """对检索 query 生成 embedding（input_type='query'，与 document 略有区别）。"""
+    client = _voyage_client()
+    if client is None:
+        return None
+    try:
+        result = client.embed([query], model=VOYAGE_MODEL, input_type="query")
+        return result.embeddings[0]
+    except Exception as e:
+        print(f"[rag] Voyage query embed 失败: {e}")
+        return None
+
+
+# ── LanceDB 向量存储 ──────────────────────────────────────────────────────────
+
+_lance_db_ref = None
+_lance_lock   = threading.Lock()
+
+def _lance_db():
+    """返回 lancedb.LanceDBConnection 单例。"""
+    global _lance_db_ref
+    if _lance_db_ref is None:
+        with _lance_lock:
+            if _lance_db_ref is None:
+                try:
+                    import lancedb
+                    Path(LANCE_DB_PATH).mkdir(parents=True, exist_ok=True)
+                    _lance_db_ref = lancedb.connect(LANCE_DB_PATH)
+                except ImportError:
+                    _lance_db_ref = False  # 标记为不可用
+    return _lance_db_ref if _lance_db_ref is not False else None
+
+
+def _lance_table():
+    """获取（或创建）vectors 表，返回 lancedb Table 或 None。"""
+    db = _lance_db()
+    if db is None:
+        return None
+    try:
+        return db.open_table("vectors")
+    except Exception:
+        pass
+    # 表不存在，先返回 None；写入时再按 schema 创建
+    return None
+
+
+def _ensure_lance_table(dim: int):
+    """确保 LanceDB vectors 表存在（首次写入时按向量维度创建）。"""
+    db = _lance_db()
+    if db is None:
+        return None
+    try:
+        return db.open_table("vectors")
+    except Exception:
+        pass
+    try:
+        import pyarrow as pa
+        schema = pa.schema([
+            pa.field("chunk_id",    pa.utf8()),
+            pa.field("source_type", pa.utf8()),
+            pa.field("title",       pa.utf8()),
+            pa.field("embed_model", pa.utf8()),   # 换模型时靠这个字段区分
+            pa.field("vector",      pa.list_(pa.float32(), dim)),
+        ])
+        return db.create_table("vectors", schema=schema)
+    except Exception as e:
+        print(f"[rag] LanceDB 建表失败: {e}")
+        return None
+
+
+def upsert_vectors(chunk_ids: list[str], texts: list[str],
+                   source_types: list[str], titles: list[str]) -> int:
+    """
+    为给定 chunks 生成 embedding 并写入 LanceDB。
+    VOYAGE_API_KEY 未设置时静默跳过，返回 0。
+    """
+    # 给每个 chunk 加书名前缀再 embed，让模型区分不同来源的相似内容
+    contextualized = [
+        f"书名：{ti}\n\n{tx}" if ti else tx
+        for ti, tx in zip(titles, texts)
+    ]
+    embeddings = embed_texts(contextualized)
+    if embeddings is None:
+        return 0
+
+    dim   = len(embeddings[0])
+    table = _ensure_lance_table(dim)
+    if table is None:
+        return 0
+
+    try:
+        import pyarrow as pa
+        rows = [
+            {
+                "chunk_id":    cid,
+                "source_type": st,
+                "title":       ti,
+                "embed_model": VOYAGE_MODEL,
+                "vector":      [float(v) for v in emb],
+            }
+            for cid, st, ti, emb in zip(chunk_ids, source_types, titles, embeddings)
+        ]
+        table.add(rows)
+        return len(rows)
+    except Exception as e:
+        print(f"[rag] LanceDB upsert 失败: {e}")
+        return 0
+
+
+def retrieve_vector(query: str, top_k: int = TOP_K_VECTOR,
+                    source_type: str | None = None) -> list[dict]:
+    """
+    向量检索：生成 query embedding，在 LanceDB 做 ANN 搜索，
+    结果格式与 retrieve_bm25 一致（方便 RRF 合并）。
+    """
+    # query 侧不加书名前缀（用户问题是开放的），与 document 侧的 input_type 区分已足够
+    qvec = embed_query(query)
+    if qvec is None:
+        return []
+
+    table = _lance_table()
+    if table is None:
+        return []
+
+    try:
+        # embed_model 过滤保证换模型后旧向量不参与检索
+        model_filter = f"embed_model = '{VOYAGE_MODEL}'"
+        where = f"{model_filter} AND source_type = '{source_type}'" if source_type else model_filter
+        q = table.search(qvec).where(where, prefilter=True).limit(top_k)
+        rows = q.to_list()
+    except Exception as e:
+        print(f"[rag] LanceDB 检索失败: {e}")
+        return []
+
+    # 补全 content 和 meta（向量表只存了 chunk_id，从 SQLite 拿全量）
+    if not rows:
+        return []
+    ids = [r["chunk_id"] for r in rows]
+    db  = _db()
+    placeholders = ",".join("?" * len(ids))
+    sql_rows = db.execute(
+        f"SELECT id,source_id,source_type,title,author,content,extra_meta "
+        f"FROM chunks WHERE id IN ({placeholders})",
+        ids,
+    ).fetchall()
+    id_to_row = {r[0]: r for r in sql_rows}
+
+    results = []
+    for r in rows:
+        cid  = r["chunk_id"]
+        dist = r.get("_distance", 0.0)
+        sql  = id_to_row.get(cid)
+        if sql is None:
+            continue
+        results.append({
+            "id": cid,
+            "source_id":   sql[1],
+            "source_type": sql[2],
+            "title":       sql[3],
+            "author":      sql[4],
+            "content":     sql[5],
+            "meta": {
+                "source_id":   sql[1],
+                "source_type": sql[2],
+                "title":       sql[3],
+                "author":      sql[4],
+                **(json.loads(sql[6]) if sql[6] else {}),
+            },
+            "score": 1.0 / (1.0 + dist),  # 距离转相似度
+        })
+    return results
 
 
 # ── BM25 检索 ─────────────────────────────────────────────────────────────────
@@ -396,25 +824,37 @@ def retrieve_fts(query: str, top_k: int = TOP_K_BM25,
     return results
 
 
+def _rrf_merge(lists: list[list[dict]], k: int = 60) -> list[dict]:
+    """
+    Reciprocal Rank Fusion：将多个排名列表合并为一个。
+    k=60 是标准默认值，数值越大对低排名文档越宽容。
+    """
+    scores: dict[str, float] = {}
+    items:  dict[str, dict]  = {}
+    for ranked in lists:
+        for rank, hit in enumerate(ranked):
+            cid = hit["id"]
+            scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank + 1)
+            if cid not in items:
+                items[cid] = hit
+    merged = sorted(items.values(), key=lambda h: scores[h["id"]], reverse=True)
+    for h in merged:
+        h["score"] = round(scores[h["id"]], 6)
+    return merged
+
+
 def retrieve(query: str, top_k: int = TOP_K,
              source_type: Optional[str] = None) -> list[dict]:
-    """主检索入口：BM25 + FTS5 结果合并去重，取 top_k。"""
-    bm25_hits = retrieve_bm25(query, top_k=TOP_K_BM25, source_type=source_type)
-    fts_hits  = retrieve_fts(query, top_k=TOP_K_BM25 // 2, source_type=source_type)
+    """
+    主检索入口：向量检索 + BM25 + FTS5，RRF 融合后取 top_k。
+    VOYAGE_API_KEY 未设时自动降级为纯 BM25 + FTS5。
+    """
+    bm25_hits   = retrieve_bm25(query, top_k=TOP_K_BM25, source_type=source_type)
+    fts_hits    = retrieve_fts(query, top_k=TOP_K_BM25 // 2, source_type=source_type)
+    vector_hits = retrieve_vector(query, top_k=TOP_K_VECTOR, source_type=source_type)
 
-    seen, merged = set(), []
-    for h in bm25_hits + fts_hits:
-        if h["id"] not in seen:
-            seen.add(h["id"])
-            merged.append(h)
-
-    # 截取候选并归一化分数
-    candidates = merged[:top_k * 3]
-    max_s = max((h["score"] for h in candidates), default=1) or 1
-    for h in candidates:
-        h["score"] = round(abs(h["score"]) / max_s, 4)
-
-    return candidates[:top_k]
+    candidates = _rrf_merge([vector_hits, bm25_hits, fts_hits])
+    return candidates[:top_k * 3] if top_k * 3 < len(candidates) else candidates
 
 
 # ── Claude 重排（可选） ────────────────────────────────────────────────────────
@@ -562,6 +1002,58 @@ if __name__ == "__main__":
         if result["failed"]:
             print(f"失败 {len(result['failed'])} 本：{result['failed']}")
 
+    elif cmd == "embed-all":
+        stype = _get_arg(sys.argv, "--type", None)  # type: ignore[arg-type]
+        db = _db()
+
+        # 只读 chunk_id + embed_model 两列，不拉 vector 列（避免 400MB+ 内存）
+        existing_ids: set[str] = set()
+        table = _lance_table()
+        if table is not None:
+            try:
+                import pyarrow.compute as pc
+                ds  = table.to_lance()
+                arr = ds.to_table(
+                    columns=["chunk_id", "embed_model"],
+                    filter=pc.field("embed_model") == VOYAGE_MODEL,
+                )
+                existing_ids = set(arr.column("chunk_id").to_pylist())
+                # 统计旧模型向量（不过滤就全读 chunk_id+embed_model，两列都是字符串，开销很小）
+                all_arr = ds.to_table(columns=["chunk_id", "embed_model"])
+                old_count = sum(1 for v in all_arr.column("embed_model").to_pylist()
+                                if v != VOYAGE_MODEL)
+                if old_count:
+                    print(f"[embed-all] 检测到 {old_count} 条旧模型向量，将补跑")
+            except Exception as e:
+                print(f"[embed-all] 读取向量表失败: {e}")
+
+        # 游标流式扫 SQLite，不 fetchall 全量（内存恒定 = 一批 content）
+        sql  = ("SELECT id,content,source_type,title FROM chunks WHERE source_type=?"
+                if stype else "SELECT id,content,source_type,title FROM chunks")
+        args = (stype,) if stype else ()
+        cur  = db.execute(sql, args)
+
+        written = scanned = skipped = 0
+        while True:
+            rows = cur.fetchmany(VOYAGE_BATCH)
+            if not rows:
+                break
+            scanned += len(rows)
+            batch = [r for r in rows if r[0] not in existing_ids]
+            skipped += len(rows) - len(batch)
+            if not batch:
+                continue
+            n = upsert_vectors(
+                chunk_ids    = [r[0] for r in batch],
+                texts        = [r[1] for r in batch],
+                source_types = [r[2] for r in batch],
+                titles       = [r[3] for r in batch],
+            )
+            written += n
+            print(f"  embedded {written} 块（扫描 {scanned}，跳过已有 {skipped}）")
+
+        print(f"embed-all 完成：{written} 块")
+
     elif cmd == "query" and len(sys.argv) >= 3:
         q = " ".join(a for a in sys.argv[2:] if not a.startswith("--"))
         stype = _get_arg(sys.argv, "--type", None)   # type: ignore[arg-type]
@@ -576,5 +1068,6 @@ if __name__ == "__main__":
             "  python -m x_agent.rag stats\n"
             "  python -m x_agent.rag ingest <file.txt|file.pdf> [--title X] [--author X] [--type X]\n"
             "  python -m x_agent.rag ingest-dir <dir> [--recursive]\n"
+            "  python -m x_agent.rag embed-all [--type pdf|book|...]\n"
             "  python -m x_agent.rag query <问题> [--type pdf|book|article|report]\n"
         )

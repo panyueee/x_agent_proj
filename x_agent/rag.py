@@ -179,6 +179,7 @@ def ingest_pdf(
     author: str = "",
     source_id: Optional[str] = None,
     pages_per_batch: int = 10,
+    source_type: str = "pdf",
 ) -> int:
     """
     解析 PDF 并入库。逐批（pages_per_batch 页）处理，peak 内存 = 单批文本大小，
@@ -238,7 +239,7 @@ def ingest_pdf(
         added += ingest_text(
             text=batch_text,
             source_id=batch_sid,
-            source_type="pdf",
+            source_type=source_type,
             title=title,
             author=author,
             extra_meta={

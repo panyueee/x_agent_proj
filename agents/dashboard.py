@@ -539,7 +539,7 @@ def _do_baidu_sync(files: list):
             dest = _bdu_download_pdf(fs_id, name)
             _bdu_log(f"  → 已保存到 books/{name}")
             from x_agent.rag import ingest_pdf
-            n = ingest_pdf(str(dest))
+            n = ingest_pdf(str(dest), source_type="netdisk")
             _bdu_log(f"  ✅ 入库 {n} 块")
             ok += 1
         except Exception as e:

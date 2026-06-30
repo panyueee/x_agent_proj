@@ -37,7 +37,6 @@ pyobjc-framework-Vision  # macOS 内置 OCR，替代 easyocr；torch/easyocr 暂
 pymupdf                  # PDF 页面渲染为图片（扫描版 OCR 前置步骤）
 
 # 数据源扩展
-akshare
 dune-client
 alphalens-reloaded==0.4.6
 cvxpy==1.9.2

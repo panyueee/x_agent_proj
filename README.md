@@ -3,6 +3,49 @@
 自动监控 X (Twitter) 上的**活跃交易策略**和 **Web3 资讯**（如 Serenity 等账号），
 打分筛选后入库，并生成一份 Markdown 摘要。可一次性运行，也可定时轮询。
 
+详细的模块说明与开发约定见 `CLAUDE.md`，接口/数据文档见 `docs/`。
+
+## 开发环境（重要）
+
+**本机有两个 Python，别用错：**
+
+- 裸 `python` / `python3` 指向一个**损坏的 anaconda Python 3.8**——它的 pip 会抛
+  `InvalidVersion: '4.0.0-unsupported'`，而且缺 pymupdf / Vision / jieba 等依赖。
+  曾经因为误用它，导致一次 OCR 任务错误地以为「工具链不可用」。
+- 项目真正的环境是 **`.venv/bin/python`（Python 3.14，由 uv 管理）**，依赖齐全。
+- 所以：**一切命令都走 `.venv/bin/python`，不要敲裸 `python`/`python3`。**
+  推荐直接用根目录的 `Makefile`，所有目标已固定使用 `.venv/bin/python`。
+
+用 [uv](https://github.com/astral-sh/uv) 创建并同步环境：
+
+```bash
+uv venv --python 3.14 .venv          # 创建 .venv（Python 3.14）
+uv pip install -r requirements.txt   # 安装依赖
+# 或一步到位：
+make install
+```
+
+验证用的是正确解释器：
+
+```bash
+.venv/bin/python --version           # 应为 Python 3.14.x
+```
+
+常用 `make` 目标（解释器固定为 `.venv/bin/python`）：
+
+| 目标 | 作用 |
+| --- | --- |
+| `make help` | 列出所有目标（默认目标） |
+| `make install` | 用 uv 创建 `.venv` 并安装 `requirements.txt` |
+| `make test` | 运行测试 `pytest tests/ -q` |
+| `make run` | 运行主流程 `main.py`（默认抓取全部数据源） |
+| `make pipeline` | X→产业链→研报 联动 `main.py --source pipeline` |
+| `make digest` | 跑一次主流程以生成 `output/digest.md` |
+| `make rag-stats` | RAG 知识库统计 `x_agent.rag stats` |
+| `make rag-query q="问题"` | RAG 检索 `x_agent.rag query` |
+| `make rag-embed` | 为入库内容补跑向量 `x_agent.rag embed-all` |
+| `make ingest-books` | 批量入库投资书籍 PDF |
+
 ## 它做什么
 
 1. **抓取**：拉取你指定账号的近期推文 + 按关键词搜索（行情策略 / Web3）。

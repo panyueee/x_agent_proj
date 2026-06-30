@@ -829,8 +829,9 @@ def rag_log_stream():
 class RagAskPayload(BaseModel):
     question:    str
     top_k:       Optional[int] = None
-    # 默认查书籍库（source_type="book"）；显式传 null 则检索全部类型
-    source_type: Optional[str] = "book"
+    # 默认检索全部类型（book/upload/netdisk 都查，含中文 OCR 的《超预测》等）；
+    # 显式传 "book" 可只查书籍库
+    source_type: Optional[str] = None
 
 
 @app.post("/api/rag/ask")

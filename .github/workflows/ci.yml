@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    # macOS runner: matches the dev env (.venv = Python 3.14, uv-managed) and is
+    # the only platform where pyobjc-framework-Vision (macOS-only OCR) installs.
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          # Cache uv's download/build cache, keyed off requirements.txt.
+          enable-cache: true
+          cache-dependency-glob: requirements.txt
+
+      - name: Set up Python 3.14
+        run: uv python install 3.14
+
+      - name: Create virtualenv
+        run: uv venv --python 3.14
+
+      - name: Install dependencies
+        # No lockfile/pyproject in the repo — requirements.txt is the source of
+        # truth. pytest isn't a declared dep, so it's installed explicitly.
+        run: |
+          uv pip install -r requirements.txt
+          uv pip install pytest
+
+      - name: Compile-check sources (cheap lint)
+        run: uv run python -m compileall -q x_agent
+
+      - name: Run tests
+        # polars / riskfolio-lib are not in requirements.txt, so the 3 tests
+        # gated on them will SKIP (by design); the rest must pass.
+        run: uv run python -m pytest tests/ -q

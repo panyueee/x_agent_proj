@@ -24,3 +24,4 @@ digest.md
 
 # PDF 书籍（本地文件，不入库）
 books/*.pdf
+data/

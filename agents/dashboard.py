@@ -23,6 +23,21 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 import uvicorn
 
+# ── 网络环境修正（百度网盘接入必需）──────────────────────────────────────────
+# 1) macOS python.org 版 urllib 默认找不到根证书 → 用 certifi 的 CA bundle，
+#    否则调百度任何 https 接口都会 SSL CERTIFICATE_VERIFY_FAILED。
+# 2) 百度是国内站，若走代理(clash 等)会断 TLS → 仅对百度域名强制直连（不动其它主机）。
+try:
+    import certifi
+    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+except Exception:
+    pass
+_BAIDU_DOMAINS = "baidu.com,openapi.baidu.com,pan.baidu.com,pcs.baidu.com,baidupcs.com,d.pcs.baidu.com"
+_np = os.environ.get("no_proxy", "") or os.environ.get("NO_PROXY", "")
+os.environ["no_proxy"] = ",".join(filter(None, [_np, _BAIDU_DOMAINS]))
+os.environ["NO_PROXY"] = os.environ["no_proxy"]
+
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
 
 ROOT      = Path(__file__).parent.parent

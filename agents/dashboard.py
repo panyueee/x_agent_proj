@@ -341,7 +341,7 @@ def _do_ingest_file(path: Path):
     _rag_log(f"开始入库：{path.name}")
     try:
         from x_agent.rag import ingest_pdf
-        n = ingest_pdf(str(path))
+        n = ingest_pdf(str(path), source_type="upload")
         if n > 0:
             _rag_log(f"✅ {path.name}  新增 {n} 块")
         else:
@@ -370,7 +370,7 @@ def _do_ingest_dir(directory: Path, recursive: bool = False):
     for idx, pdf in enumerate(pdfs, 1):
         try:
             from x_agent.rag import ingest_pdf
-            n = ingest_pdf(str(pdf))
+            n = ingest_pdf(str(pdf), source_type="upload")
             if n > 0:
                 ok += 1
                 _rag_log(f"  ✅ [{idx}/{total}] {pdf.name}  新增 {n} 块")

@@ -17,6 +17,7 @@ import urllib.parse
 from pathlib import Path
 from typing import List, Optional
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, BackgroundTasks
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
@@ -400,6 +401,40 @@ _bdu_sync = {
 }
 _bdu_lock = threading.Lock()
 
+# 自动同步配置与状态
+BAIDU_SYNCED_FILE = ROOT / "output" / "baidu_synced.json"
+
+_bdu_auto_cfg = {
+    "enabled":          False,
+    "watch_dirs":       ["/"],
+    "interval_minutes": 60,
+}
+_bdu_auto_state = {
+    "last_run":    "",   # ISO 时间
+    "last_new":    0,    # 上次新增文件数
+    "next_run":    "",
+    "running":     False,
+}
+_bdu_stop_event = threading.Event()
+
+
+def _bdu_synced_ids() -> set:
+    """读取已同步的 fs_id 集合。"""
+    try:
+        if BAIDU_SYNCED_FILE.exists():
+            return set(json.loads(BAIDU_SYNCED_FILE.read_text()))
+    except Exception:
+        pass
+    return set()
+
+
+def _bdu_mark_synced(fs_id: int):
+    """将 fs_id 写入已同步集合。"""
+    ids = _bdu_synced_ids()
+    ids.add(str(fs_id))
+    BAIDU_SYNCED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BAIDU_SYNCED_FILE.write_text(json.dumps(sorted(ids), ensure_ascii=False))
+
 
 def _bdu_log(msg: str):
     with _bdu_lock:
@@ -541,6 +576,7 @@ def _do_baidu_sync(files: list):
             from x_agent.rag import ingest_pdf
             n = ingest_pdf(str(dest), source_type="netdisk")
             _bdu_log(f"  ✅ 入库 {n} 块")
+            _bdu_mark_synced(fs_id)
             ok += 1
         except Exception as e:
             _bdu_log(f"  ❌ 失败：{e}")
@@ -550,9 +586,73 @@ def _do_baidu_sync(files: list):
     _bdu_sync["status"] = "done" if not failed else "error"
 
 
+def _bdu_scan_pdfs(watch_dirs: list) -> list:
+    """递归扫描 watch_dirs，返回所有 PDF 文件列表（去重）。"""
+    seen = set()
+    results = []
+    queue = list(watch_dirs)
+    while queue:
+        d = queue.pop(0)
+        try:
+            items = _bdu_list_dir(d)
+        except Exception as e:
+            _bdu_log(f"[自动同步] 扫描 {d} 失败：{e}")
+            continue
+        for item in items:
+            if item["is_dir"]:
+                queue.append(item["path"])
+            elif str(item["fs_id"]) not in seen:
+                seen.add(str(item["fs_id"]))
+                results.append(item)
+    return results
+
+
+def _do_auto_sync():
+    """执行一次增量同步：扫描目录，只下载未同步的新文件。"""
+    import datetime as _dt
+    _bdu_auto_state["running"] = True
+    _bdu_auto_state["last_run"] = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        if not _bdu_access_token():
+            _bdu_log("[自动同步] 未授权，跳过本轮")
+            return
+        watch_dirs = _bdu_auto_cfg["watch_dirs"]
+        _bdu_log(f"[自动同步] 开始扫描 {watch_dirs}...")
+        all_pdfs  = _bdu_scan_pdfs(watch_dirs)
+        synced    = _bdu_synced_ids()
+        new_files = [f for f in all_pdfs if str(f["fs_id"]) not in synced]
+        _bdu_log(f"[自动同步] 共 {len(all_pdfs)} 个 PDF，{len(new_files)} 个新文件")
+        if new_files:
+            _do_baidu_sync(new_files)
+        _bdu_auto_state["last_new"] = len(new_files)
+    except Exception as e:
+        _bdu_log(f"[自动同步] 异常：{e}")
+    finally:
+        _bdu_auto_state["running"] = False
+
+
+def _bdu_auto_sync_loop():
+    """后台守护线程：按间隔定期执行增量同步。"""
+    import datetime as _dt
+    while not _bdu_stop_event.is_set():
+        if _bdu_auto_cfg["enabled"]:
+            _do_auto_sync()
+        interval = _bdu_auto_cfg["interval_minutes"] * 60
+        next_ts = _dt.datetime.now() + _dt.timedelta(seconds=interval)
+        _bdu_auto_state["next_run"] = next_ts.strftime("%Y-%m-%d %H:%M:%S")
+        _bdu_stop_event.wait(timeout=interval)
+
+
 # ── FastAPI ───────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Agent 开发看板")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    t = threading.Thread(target=_bdu_auto_sync_loop, daemon=True, name="bdu-auto-sync")
+    t.start()
+    yield
+    _bdu_stop_event.set()
+
+app = FastAPI(title="Agent 开发看板", lifespan=lifespan)
 
 
 class NotePayload(BaseModel):
@@ -822,6 +922,46 @@ def baidu_sync_log_stream():
 def baidu_disconnect():
     if BAIDU_TOKEN_FILE.exists():
         BAIDU_TOKEN_FILE.unlink()
+    return {"ok": True}
+
+
+@app.get("/api/baidu/auto-sync")
+def baidu_auto_sync_status():
+    return {
+        "config":      _bdu_auto_cfg,
+        "state":       _bdu_auto_state,
+        "synced_count": len(_bdu_synced_ids()),
+    }
+
+
+class BaiduAutoSyncConfig(BaseModel):
+    enabled:          Optional[bool] = None
+    watch_dirs:       Optional[list] = None
+    interval_minutes: Optional[int]  = None
+
+
+@app.post("/api/baidu/auto-sync/config")
+def baidu_auto_sync_config(payload: BaiduAutoSyncConfig):
+    if payload.enabled is not None:
+        _bdu_auto_cfg["enabled"] = payload.enabled
+    if payload.watch_dirs is not None:
+        _bdu_auto_cfg["watch_dirs"] = payload.watch_dirs
+    if payload.interval_minutes is not None:
+        if payload.interval_minutes < 5:
+            raise HTTPException(400, "最小间隔 5 分钟")
+        _bdu_auto_cfg["interval_minutes"] = payload.interval_minutes
+    # 立即唤醒循环线程重新计算下次运行时间
+    _bdu_stop_event.set()
+    _bdu_stop_event.clear()
+    return {"ok": True, "config": _bdu_auto_cfg}
+
+
+@app.post("/api/baidu/auto-sync/run-now")
+def baidu_auto_sync_run_now(background_tasks: BackgroundTasks):
+    """立即触发一次增量同步（不等待定时器）。"""
+    if _bdu_auto_state["running"]:
+        raise HTTPException(409, "自动同步正在运行中")
+    background_tasks.add_task(_do_auto_sync)
     return {"ok": True}
 
 
@@ -1119,6 +1259,31 @@ textarea:focus { border-color:#3b82f6; }
 
       <!-- 同步日志 -->
       <div class="rag-log" id="bdu-log" style="margin-top:10px"><span style="color:#475569">等待同步...</span></div>
+
+      <!-- 自动同步配置 -->
+      <div id="bdu-auto-section" style="display:none;margin-top:14px;padding:10px 12px;background:#0a0c10;border:1px solid #2d3348;border-radius:8px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <span style="font-size:12px;font-weight:600;color:#94a3b8">🔄 定时增量同步</span>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#94a3b8;cursor:pointer">
+            <input type="checkbox" id="bdu-auto-enabled" onchange="bduAutoToggle(this.checked)">
+            启用
+          </label>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+          <input id="bdu-watch-dir" value="/" placeholder="/我的文档"
+                 style="flex:1;min-width:120px;background:#1e293b;border:1px solid #2d3348;border-radius:6px;color:#e2e8f0;padding:5px 8px;font-size:12px;outline:none">
+          <select id="bdu-interval" style="background:#1e293b;border:1px solid #2d3348;border-radius:6px;color:#e2e8f0;padding:5px 8px;font-size:12px;outline:none">
+            <option value="15">15 分钟</option>
+            <option value="30">30 分钟</option>
+            <option value="60" selected>1 小时</option>
+            <option value="360">6 小时</option>
+            <option value="1440">每天</option>
+          </select>
+          <button class="btn-sm" onclick="bduAutoSaveConfig()">保存</button>
+          <button class="btn-sm primary" onclick="bduAutoRunNow()">立即同步</button>
+        </div>
+        <div id="bdu-auto-state" style="font-size:11px;color:#475569">加载中...</div>
+      </div>
     </div>
 
     <!-- 进度条（批量入库时显示） -->
@@ -1450,12 +1615,15 @@ async function refreshBduStatus() {
     btnAuth.style.display = 'none';
     btnDis.style.display  = '';
     browser.style.display = '';
+    document.getElementById('bdu-auto-section').style.display = '';
+    refreshBduAutoState();
   } else {
     badge.style.background = '#1e293b'; badge.style.color = '#64748b';
     badge.textContent = '未连接';
     btnAuth.style.display = '';
     btnDis.style.display  = 'none';
     browser.style.display = 'none';
+    document.getElementById('bdu-auto-section').style.display = 'none';
   }
 
   // 同步状态
@@ -1571,6 +1739,66 @@ async function bduSync() {
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({files: selected})
   });
+}
+
+// ── 自动同步 ──────────────────────────────────────────────────────────────────
+
+async function refreshBduAutoState() {
+  try {
+    const r = await fetch('/api/baidu/auto-sync');
+    if (!r.ok) return;
+    const {config, state, synced_count} = await r.json();
+    document.getElementById('bdu-auto-enabled').checked = config.enabled;
+    document.getElementById('bdu-watch-dir').value = (config.watch_dirs || ['/'])[0];
+    const sel = document.getElementById('bdu-interval');
+    sel.value = String(config.interval_minutes);
+    const stEl = document.getElementById('bdu-auto-state');
+    const parts = [];
+    if (state.last_run) parts.push(`上次：${state.last_run}（新增 ${state.last_new} 本）`);
+    if (state.next_run && config.enabled) parts.push(`下次：${state.next_run}`);
+    parts.push(`已同步：${synced_count} 个文件`);
+    if (state.running) parts.push('🔄 同步中...');
+    stEl.textContent = parts.join('　');
+  } catch(e) {}
+}
+
+async function bduAutoToggle(enabled) {
+  await fetch('/api/baidu/auto-sync/config', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({enabled})
+  });
+  refreshBduAutoState();
+}
+
+async function bduAutoSaveConfig() {
+  const watch_dirs = [document.getElementById('bdu-watch-dir').value.trim() || '/'];
+  const interval_minutes = parseInt(document.getElementById('bdu-interval').value);
+  const r = await fetch('/api/baidu/auto-sync/config', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({watch_dirs, interval_minutes})
+  });
+  if (r.ok) { refreshBduAutoState(); } else { alert('保存失败'); }
+}
+
+async function bduAutoRunNow() {
+  const r = await fetch('/api/baidu/auto-sync/run-now', {method:'POST'});
+  if (!r.ok) { const d = await r.json(); alert(d.detail); return; }
+  const logEl = document.getElementById('bdu-log');
+  logEl.innerHTML = '';
+  if (bduLogES) bduLogES.close();
+  bduLogES = new EventSource('/api/baidu/sync/log/stream');
+  bduLogES.onmessage = e => {
+    const line = JSON.parse(e.data);
+    if (line.startsWith('__status__:')) { refreshBduAutoState(); refreshRagStats(); return; }
+    if (logEl.querySelector('span')) logEl.innerHTML = '';
+    const div = document.createElement('div');
+    if (line.includes('✅')) div.className = 'ok';
+    else if (line.includes('❌')) div.className = 'fail';
+    else if (line.includes('⬇')) div.className = 'info';
+    div.textContent = line;
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+  };
 }
 
 // ── 主循环 ────────────────────────────────────────────────────────────────────

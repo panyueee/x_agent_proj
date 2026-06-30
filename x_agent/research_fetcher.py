@@ -51,6 +51,12 @@ class SupplierUpdate:
 class ResearchClient:
     """研报与供应商跟踪客户端。"""
 
+    def __init__(self):
+        # 复用 Session：研报/供应商接口常按多只个股循环调用，keep-alive 复用连接。
+        # 默认头一次设定，个别接口（同花顺）调用时再用 headers 参数覆盖 Referer。
+        self.session = requests.Session()
+        self.session.headers.update(HEADERS)
+
     def fetch_reports_eastmoney(self, stock_code: str, max_results: int = 20) -> List[ResearchReport]:
         """从东方财富拉取个股研报列表。"""
         url = "https://reportapi.eastmoney.com/report/list"
@@ -71,7 +77,7 @@ class ResearchClient:
         }
         reports = []
         try:
-            r = requests.get(url, params=params, headers=HEADERS, timeout=10)
+            r = self.session.get(url, params=params, timeout=10)
             text = r.text
             # 东方财富 JSONP 格式：datatable(...)
             if text.startswith("datatable("):
@@ -113,7 +119,8 @@ class ResearchClient:
         }
         reports = []
         try:
-            r = requests.get(url, params=params, headers={**HEADERS, "Referer": "https://www.10jqka.com.cn"}, timeout=10)
+            r = self.session.get(url, params=params,
+                                 headers={"Referer": "https://www.10jqka.com.cn"}, timeout=10)
             items = (r.json().get("data") or {}).get("list") or []
             for item in items:
                 reports.append(ResearchReport(
@@ -149,7 +156,7 @@ class ResearchClient:
         }
         updates = []
         try:
-            r = requests.get(url, params=params, headers=HEADERS, timeout=10)
+            r = self.session.get(url, params=params, timeout=10)
             items = r.json().get("result", {}).get("data") or []
             for item in items:
                 updates.append(SupplierUpdate(

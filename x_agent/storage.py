@@ -857,15 +857,17 @@ class Store:
             )
         """)
         placeholders = ", ".join("?" * (1 + len(factor_cols)))
-        for row in rows:
-            date_val = str(row["date"])
-            vals = [row.get(c) for c in factor_cols]
-            col_list = ", ".join(f'"{c}"' for c in factor_cols)
-            self.conn.execute(
-                f"INSERT OR REPLACE INTO factor_returns (date, {col_list}) "
-                f"VALUES ({placeholders})",
-                [date_val] + vals,
-            )
+        # SQL 与列名拼接在循环外只算一次，整批用 executemany 写入
+        col_list = ", ".join(f'"{c}"' for c in factor_cols)
+        sql = (
+            f"INSERT OR REPLACE INTO factor_returns (date, {col_list}) "
+            f"VALUES ({placeholders})"
+        )
+        params = [
+            [str(row["date"])] + [row.get(c) for c in factor_cols]
+            for row in rows
+        ]
+        self.conn.executemany(sql, params)
         self.conn.commit()
 
     def recent_supplier_updates(self, customer_name: str, limit: int = 20) -> list:

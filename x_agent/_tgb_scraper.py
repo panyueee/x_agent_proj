@@ -17,6 +17,20 @@ BASE = "https://www.tgb.cn"
 UA   = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
+# 预编译正则：以下模式在文章解析与锚点遍历的热循环里被反复使用，
+# 模块级编译一次可避免每篇文章/每个 <a> 重复编译。
+_RE_VIEWS       = re.compile(r"浏览\s*([\d,]+)")
+_RE_COMMENTS    = re.compile(r"评论\s*([\d,]+)")
+_RE_DATETIME    = re.compile(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})")
+_RE_AUTHOR      = re.compile(r"^(\S+)\s+淘股吧")
+_RE_ARTICLE_ID  = re.compile(r"/Article/(\d+)|/a/(\w+)")
+_RE_HREF_A      = re.compile(r"^/a/\w+$")
+_RE_HREF_ART    = re.compile(r"^/Article/\d+")
+_RE_ART_SEARCH  = re.compile(r"/Article/\d+")
+_RE_POST        = re.compile(r"/post/\d+")
+_RE_T           = re.compile(r"/t/\d+")
+_RE_DATE        = re.compile(r"\d{4}-\d{2}-\d{2}")
+
 # ── 全局硬超时（SIGALRM，macOS/Linux 专用）──────────────────────────
 def _hard_timeout(signum, frame):
     os._exit(2)   # 强制退出，不触发 atexit / finally
@@ -79,11 +93,11 @@ def _parse_article(page, url):
             body += " " + " ".join(img_alts[:5])
     except Exception:
         pass
-    views    = re.search(r"浏览\s*([\d,]+)", meta)
-    comments = re.search(r"评论\s*([\d,]+)", meta)
-    date_m   = re.search(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})", meta)
-    author_m = re.match(r"^(\S+)\s+淘股吧", meta)
-    aid      = re.search(r"/Article/(\d+)|/a/(\w+)", url)
+    views    = _RE_VIEWS.search(meta)
+    comments = _RE_COMMENTS.search(meta)
+    date_m   = _RE_DATETIME.search(meta)
+    author_m = _RE_AUTHOR.match(meta)
+    aid      = _RE_ARTICLE_ID.search(url)
     article_id = (aid.group(1) or aid.group(2)) if aid else url.split("/")[-1]
     return {
         "id":            article_id,
@@ -119,7 +133,7 @@ def scrape_blog(user_id, max_results):
                 prev_count = cur
             for a in page.query_selector_all("a"):
                 href = a.get_attribute("href") or ""
-                if re.match(r"^/a/\w+$", href) or re.match(r"^/Article/\d+", href):
+                if _RE_HREF_A.match(href) or _RE_HREF_ART.match(href):
                     title = a.inner_text().strip()
                     if title:
                         results.append({"url": BASE + href, "title": title})
@@ -147,7 +161,7 @@ def scrape_blog_since(user_id, since_date_str, max_scroll=10):
                 page.wait_for_timeout(800)
                 try:
                     body_text = page.inner_text("body")
-                    dates = re.findall(r"\d{4}-\d{2}-\d{2}", body_text)
+                    dates = _RE_DATE.findall(body_text)
                     if dates and min(dates) < since_date_str:
                         break
                 except Exception:
@@ -158,7 +172,7 @@ def scrape_blog_since(user_id, since_date_str, max_scroll=10):
                 prev_count = cur
             for a in page.query_selector_all("a"):
                 href = a.get_attribute("href") or ""
-                if re.match(r"^/a/\w+$", href) or re.match(r"^/Article/\d+", href):
+                if _RE_HREF_A.match(href) or _RE_HREF_ART.match(href):
                     title = a.inner_text().strip()
                     full  = BASE + href
                     if full not in seen and title:
@@ -242,7 +256,7 @@ def scrape_user_replies(user_id, since_date_str, max_scroll=15):
                 page.wait_for_timeout(800)
                 try:
                     body_text = page.inner_text("body")
-                    dates = re.findall(r"\d{4}-\d{2}-\d{2}", body_text)
+                    dates = _RE_DATE.findall(body_text)
                     if dates and min(dates) < since_date_str:
                         break
                 except Exception:
@@ -295,7 +309,7 @@ def scrape_user_replies(user_id, since_date_str, max_scroll=15):
                 article_title = item.get("article_title", "")
                 comment_text  = full_text.replace(article_title, "").replace(created_at, "").strip()
 
-                aid = re.search(r"/Article/(\d+)|/a/(\w+)", art_url)
+                aid = _RE_ARTICLE_ID.search(art_url)
                 art_id = (aid.group(1) or aid.group(2)) if aid else art_url.split("/")[-1]
                 reply_id = f"tgbreply_{user_id}_{art_id}"
 
@@ -333,8 +347,8 @@ def scrape_stock_posts(stock_code, max_results):
                 prev_count = cur
             for a in page.query_selector_all("a"):
                 href = a.get_attribute("href") or ""
-                if (re.search(r"/post/\d+", href) or re.search(r"/t/\d+", href)
-                        or re.match(r"^/a/\w+$", href) or re.search(r"/Article/\d+", href)):
+                if (_RE_POST.search(href) or _RE_T.search(href)
+                        or _RE_HREF_A.match(href) or _RE_ART_SEARCH.search(href)):
                     title = a.inner_text().strip()
                     if title:
                         full = href if href.startswith("http") else BASE + href

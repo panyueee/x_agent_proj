@@ -54,13 +54,16 @@ _SYSTEM_PROMPT = """\
 # 不需要 LLM 的简单公司代码正则（辅助提取 A 股代码）
 _CODE_RE = re.compile(r'\b([036]\d{5})\b')
 
+# 预筛关键词只在模块加载时小写化一次，避免每条帖子都重复 h.lower()
+_CHAIN_HINTS_LC = [(chain, [h.lower() for h in hints]) for chain, hints in _CHAIN_HINTS.items()]
+
 
 def _prefilter(text: str) -> str | None:
     """返回命中的产业链名称，无关内容返回 None。"""
     text_lower = text.lower()
-    for chain, hints in _CHAIN_HINTS.items():
+    for chain, hints in _CHAIN_HINTS_LC:
         for h in hints:
-            if h.lower() in text_lower:
+            if h in text_lower:
                 return chain
     return None
 

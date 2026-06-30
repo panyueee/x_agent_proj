@@ -39,15 +39,19 @@ _TRIGGER_RULES: list[dict] = [
 ]
 
 
+# 触发词只在模块加载时小写化一次，避免每条推文都重复 kw.lower()
+_TRIGGER_RULES_LC = [(r["chain"], [kw.lower() for kw in r["keywords"]]) for r in _TRIGGER_RULES]
+
+
 def _match_triggers(text: str) -> List[str]:
     """返回 text 命中的产业链名称列表（可能多个）。"""
     text_lower = text.lower()
     matched = []
-    for rule in _TRIGGER_RULES:
-        for kw in rule["keywords"]:
-            if kw.lower() in text_lower:
-                if rule["chain"] not in matched:
-                    matched.append(rule["chain"])
+    for chain, keywords in _TRIGGER_RULES_LC:
+        for kw in keywords:
+            if kw in text_lower:
+                if chain not in matched:
+                    matched.append(chain)
                 break
     return matched
 

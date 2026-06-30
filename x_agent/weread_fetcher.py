@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Optional
 
@@ -17,6 +18,10 @@ import requests
 
 _BASE = "https://weread.qq.com"
 _API  = f"{_BASE}/web"
+
+# 章节正文清洗用正则，预编译避免逐章重复编译（整本书可达数百章）
+_TAG_RE       = re.compile(r"<[^>]+>")
+_BLANKLINE_RE = re.compile(r"\n{3,}")
 
 # 默认 User-Agent（模拟 Chrome）
 _UA = (
@@ -123,14 +128,13 @@ class WeReadClient:
         html = data.get("chapterContentHtml") or data.get("chapterContentStr", "")
         if not html:
             return ""
-        # 简单剥离 HTML 标签
-        import re
-        text = re.sub(r"<[^>]+>", "", html)
-        text = re.sub(r"&nbsp;", " ", text)
-        text = re.sub(r"&lt;",  "<", text)
-        text = re.sub(r"&gt;",  ">", text)
-        text = re.sub(r"&amp;", "&", text)
-        text = re.sub(r"\n{3,}", "\n\n", text.strip())
+        # 简单剥离 HTML 标签：标签/连续空行用预编译正则，实体替换用 str.replace 更快
+        text = _TAG_RE.sub("", html)
+        text = (text.replace("&nbsp;", " ")
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&amp;", "&"))
+        text = _BLANKLINE_RE.sub("\n\n", text.strip())
         return text
 
     # ── 高层接口：完整书籍 ────────────────────────────────────────────────────

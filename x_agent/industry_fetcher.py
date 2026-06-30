@@ -45,6 +45,12 @@ class ChainEvent:
 class IndustryClient:
     """产业链数据抓取客户端。"""
 
+    def __init__(self):
+        # 复用 Session：板块/新闻/公告接口常在多条产业链上循环调用，
+        # keep-alive 复用连接，默认头一次设定。
+        self.session = requests.Session()
+        self.session.headers.update(HEADERS)
+
     def fetch_sector_stocks(self, sector_code: str, max_results: int = 50) -> List[dict]:
         """
         拉取东方财富行业板块成分股。
@@ -60,7 +66,7 @@ class IndustryClient:
             "fields": "f12,f14,f3,f4,f5,f6",  # 代码、名称、涨跌幅、净值、量、额
         }
         try:
-            r = requests.get(url, params=params, headers=HEADERS, timeout=10)
+            r = self.session.get(url, params=params, timeout=10)
             data = r.json().get("data", {}) or {}
             diff = data.get("diff") or []
             return [
@@ -84,7 +90,7 @@ class IndustryClient:
         }
         events = []
         try:
-            r = requests.get(url, params=params, headers=HEADERS, timeout=10)
+            r = self.session.get(url, params=params, timeout=10)
             items = r.json().get("result", {}).get("data") or []
             for item in items:
                 events.append(ChainEvent(
@@ -119,7 +125,7 @@ class IndustryClient:
         }
         events = []
         try:
-            r = requests.post(url, json=payload, headers=HEADERS, timeout=10)
+            r = self.session.post(url, json=payload, timeout=10)
             items = r.json().get("announcements") or []
             for item in items[:max_results]:
                 events.append(ChainEvent(

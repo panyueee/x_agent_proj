@@ -18,6 +18,10 @@ TMP_IMG  = "/tmp/xhs_ocr.jpg"
 HEADERS  = {"Referer": "https://www.xiaohongshu.com", "User-Agent": "Mozilla/5.0"}
 MAX_IMGS = 3   # 每条笔记最多 OCR 几张图
 
+# 复用 Session 下载笔记图片：同一 CDN 多图连续下载，keep-alive 省握手
+_session = requests.Session()
+_session.headers.update(HEADERS)
+
 
 def _apple_vision_ocr(image_path: str) -> str:
     """用 macOS 内置 Vision 框架识别图片文字，中英文均支持。"""
@@ -63,7 +67,7 @@ def _ocr_images(image_list: list) -> str:
             continue
         seen_urls.add(url)
         try:
-            r = requests.get(url, headers=HEADERS, timeout=10)
+            r = _session.get(url, timeout=10)
             with open(TMP_IMG, "wb") as f:
                 f.write(r.content)
             text = _apple_vision_ocr(TMP_IMG)

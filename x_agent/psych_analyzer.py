@@ -47,11 +47,17 @@ GREED_KEYWORDS: dict[str, int] = {
 }
 
 
+# 关键词表只在模块加载时小写化一次，避免每条帖子都重复 kw.lower()
+# （保留与原 dict.items() 完全一致的顺序与重复项，行为不变）
+_FEAR_KEYWORDS_LC = [(kw.lower(), w) for kw, w in FEAR_KEYWORDS.items()]
+_GREED_KEYWORDS_LC = [(kw.lower(), w) for kw, w in GREED_KEYWORDS.items()]
+
+
 def _score_text(text: str) -> tuple[int, int]:
     """返回 (fear_score, greed_score)，不区分大小写。"""
     lower = text.lower()
-    fear  = sum(w for kw, w in FEAR_KEYWORDS.items()  if kw.lower() in lower)
-    greed = sum(w for kw, w in GREED_KEYWORDS.items() if kw.lower() in lower)
+    fear  = sum(w for kw, w in _FEAR_KEYWORDS_LC  if kw in lower)
+    greed = sum(w for kw, w in _GREED_KEYWORDS_LC if kw in lower)
     return fear, greed
 
 

@@ -47,7 +47,6 @@ class DuneFetcher:
     def _latest(self, query_id: int):
         """拉取指定查询的最新缓存结果，失败返回空列表。"""
         try:
-            from dune_client.query import QueryBase
             result = self._client.get_latest_result(query_id)
             return result.result.rows if result and result.result else []
         except Exception as e:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import re
 import requests
 import time
@@ -43,19 +44,35 @@ def _now_iso() -> str:
 def _safe_float(val, default=0.0):
     """容忍 None / NaN / 空字符串的安全转换。"""
     try:
-        import math
         f = float(val)
         return default if math.isnan(f) or math.isinf(f) else f
     except (TypeError, ValueError):
         return default
 
 
+def _safe_float_or_none(row, col):
+    """从 DataFrame 行取列转 float；None/NaN/Inf/转换失败一律返回 None。"""
+    v = row.get(col)
+    try:
+        f = float(v)
+        return None if (math.isnan(f) or math.isinf(f)) else f
+    except (TypeError, ValueError):
+        return None
+
+
 _SINA_HEADERS = {"Referer": "https://finance.sina.com.cn"}
 _EMC_HEADERS  = {"Referer": "https://eastmoney.com"}
+# A股新浪行情行解析正则，预编译避免每行重复编译
+_SINA_LINE_RE = re.compile(r'hq_str_s[hz](\d+)="([^"]*)"')
 
 
 class FinanceClient:
     """行情客户端，按数据源分组，每组独立容错。"""
+
+    def __init__(self):
+        # 复用同一 Session：东方财富 push2/push2his 等接口在循环里被多次命中，
+        # 连接池/keep-alive 可显著减少握手开销。headers 仍按数据源逐次传入。
+        self._session = requests.Session()
 
     # ---- A股实时行情（新浪财经）----
 
@@ -75,12 +92,12 @@ class FinanceClient:
         try:
             sina_codes = ",".join(_prefix(s) for s in symbols)
             url = f"http://hq.sinajs.cn/list={sina_codes}"
-            resp = requests.get(url, headers=_SINA_HEADERS, timeout=10)
+            resp = self._session.get(url, headers=_SINA_HEADERS, timeout=10)
             resp.encoding = "gbk"
             ts = _now_iso()
             for line in resp.text.splitlines():
                 # var hq_str_sh600519="贵州茅台,昨收,今开,最高,最低,当前价,成交量(手),..."
-                m = re.search(r'hq_str_s[hz](\d+)="([^"]*)"', line)
+                m = _SINA_LINE_RE.search(line)
                 if not m:
                     continue
                 code   = m.group(1)
@@ -173,7 +190,7 @@ class FinanceClient:
                     f"?secid={market_id}.{sym}"
                     "&fields=f43,f44,f45,f46,f57,f58,f170,f47"
                 )
-                r = requests.get(url, headers=_EMC_HEADERS, timeout=8)
+                r = self._session.get(url, headers=_EMC_HEADERS, timeout=8)
                 d = r.json().get("data") or {}
                 if not d or d.get("f43") in (None, "-"):
                     continue
@@ -208,7 +225,7 @@ class FinanceClient:
                     "&fields2=f51,f52,f53,f54,f55,f56"
                     f"&klt=101&fqt=1&end=20500101&lmt={days}"
                 )
-                r = requests.get(url, headers=_EMC_HEADERS, timeout=10)
+                r = self._session.get(url, headers=_EMC_HEADERS, timeout=10)
                 klines = (r.json().get("data") or {}).get("klines") or []
                 if not klines:
                     continue
@@ -249,7 +266,7 @@ class FinanceClient:
             pair = sym.replace("/", "_")
             try:
                 url = f"https://api.gateio.ws/api/v4/spot/tickers?currency_pair={pair}"
-                r = requests.get(url, timeout=10)
+                r = self._session.get(url, timeout=10)
                 data = r.json()
                 if not data:
                     continue
@@ -277,7 +294,7 @@ class FinanceClient:
         pair = symbol.replace("/", "_")
         try:
             url = f"https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair={pair}&interval=1d&limit={days}"
-            r = requests.get(url, timeout=10)
+            r = self._session.get(url, timeout=10)
             raw = r.json()   # [[timestamp, volume, close, high, low, open], ...]
             bars = []
             prev_close = None
@@ -327,7 +344,7 @@ class FinanceClient:
                     f"?secid={secid}"
                     "&fields=f43,f44,f45,f46,f57,f58,f170,f47"
                 )
-                r = requests.get(url, headers=_EMC_HEADERS, timeout=8)
+                r = self._session.get(url, headers=_EMC_HEADERS, timeout=8)
                 d = r.json().get("data") or {}
                 if not d or d.get("f43") in (None, "-", 0):
                     print(f"[finance] 指数 {sym} ({secid}) 无数据")
@@ -360,7 +377,7 @@ class FinanceClient:
                 "&fields2=f51,f52,f53,f54,f55,f56"
                 f"&klt=101&fqt=1&end=20500101&lmt={days}"
             )
-            r = requests.get(url, headers=_EMC_HEADERS, timeout=10)
+            r = self._session.get(url, headers=_EMC_HEADERS, timeout=10)
             klines = (r.json().get("data") or {}).get("klines") or []
             if not klines:
                 return []
@@ -502,7 +519,6 @@ class AKShareClient:
           symbol / report_date / total_revenue / per_share_cf / fetched_at
         """
         ak = self._import_ak()
-        import math
 
         def _suffix(code: str) -> str:
             return code + (".SH" if code.startswith(("6", "9")) else ".SZ")
@@ -522,19 +538,11 @@ class AKShareClient:
                     if not report_date:
                         continue
 
-                    def _f(col):
-                        v = row.get(col)
-                        try:
-                            f = float(v)
-                            return None if (math.isnan(f) or math.isinf(f)) else f
-                        except (TypeError, ValueError):
-                            return None
-
                     results.append({
                         "symbol":        symbol,
                         "report_date":   report_date,
-                        "total_revenue": _f("TOTALOPERATEREVE"),  # 营业总收入（元）
-                        "per_share_cf":  _f("FCFF_BACK"),         # 企业自由现金流（元）
+                        "total_revenue": _safe_float_or_none(row, "TOTALOPERATEREVE"),  # 营业总收入（元）
+                        "per_share_cf":  _safe_float_or_none(row, "FCFF_BACK"),         # 企业自由现金流（元）
                         "fetched_at":    fetched_at,
                     })
                 time.sleep(0.3)
@@ -600,7 +608,6 @@ class AKShareClient:
         """
         try:
             ak = self._import_ak()
-            import math
             date_str = today or dt.date.today().isoformat()
             print(f"[akshare] 拉取全市场基本面快照（{date_str}），约需 4 分钟...")
             df = ak.stock_zh_a_spot_em()
@@ -614,18 +621,10 @@ class AKShareClient:
                 if not symbol:
                     continue
 
-                def _f(col):
-                    v = row.get(col)
-                    try:
-                        f = float(v)
-                        return None if (math.isnan(f) or math.isinf(f)) else f
-                    except (TypeError, ValueError):
-                        return None
-
-                market_cap = _f("总市值")
-                float_cap  = _f("流通市值")
-                pb         = _f("市净率")
-                pe_ttm     = _f("市盈率-动态")
+                market_cap = _safe_float_or_none(row, "总市值")
+                float_cap  = _safe_float_or_none(row, "流通市值")
+                pb         = _safe_float_or_none(row, "市净率")
+                pe_ttm     = _safe_float_or_none(row, "市盈率-动态")
                 book_price = (1.0 / pb) if (pb and pb > 0) else None
 
                 records.append({

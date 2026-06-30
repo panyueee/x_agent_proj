@@ -217,14 +217,14 @@ def _rag_section() -> list:
 def _factor_section(store) -> list:
     """因子收益率摘要：最近 20 天各因子表现。"""
     try:
-        rows = store.conn.execute(
+        cur = store.conn.execute(
             "SELECT * FROM factor_returns ORDER BY date DESC LIMIT 20"
-        ).fetchall()
+        )
+        rows = cur.fetchall()
         if not rows:
             return []
-        cols = [d[0] for d in store.conn.execute(
-            "SELECT * FROM factor_returns LIMIT 0"
-        ).description]
+        # 列名直接取自同一游标的 description，省去额外的 SELECT 查询
+        cols = [d[0] for d in cur.description]
     except Exception:
         return []
 

@@ -301,11 +301,17 @@ class ListedCompanyClient:
         "X-Requested-With": "XMLHttpRequest",
     }
 
+    def __init__(self):
+        # 复用 Session：fetch_all 会多次命中同一 F10 域名，连接池/keep-alive 省握手开销。
+        # 默认头一次设定，后续请求自动携带。
+        self.session = requests.Session()
+        self.session.headers.update(self._HEADERS)
+
     def _get(self, path: str, stock_code: str) -> dict:
         prefix_code = _em_prefix_code(stock_code)
-        resp = requests.get(f"{self._BASE}/{path}/PageAjax",
-                            params={"code": prefix_code},
-                            headers=self._HEADERS, timeout=15)
+        resp = self.session.get(f"{self._BASE}/{path}/PageAjax",
+                                params={"code": prefix_code},
+                                timeout=15)
         resp.raise_for_status()
         return resp.json()
 

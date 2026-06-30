@@ -50,6 +50,9 @@ AGENTS = [
      "worktree": ".claude/worktrees/feature-research"},
 ]
 
+# 合法 agent id 集合（AGENTS 为常量，提前构建避免每次请求重复生成集合）
+_AGENT_IDS = {a["id"] for a in AGENTS}
+
 # ── 运行状态（内存，进程重启后重置）──────────────────────────────────────────
 
 _run = {
@@ -86,8 +89,12 @@ def _agent_status(agent: dict) -> dict:
     if not wt.exists():
         return {**agent, "exists": False, "last_commit": "", "last_commit_time": "",
                 "dirty_files": [], "ahead": 0, "status": "no_worktree"}
-    last_commit      = _git(["log", "-1", "--pretty=%s"], wt)
-    last_commit_time = _git(["log", "-1", "--pretty=%cr"], wt)
+    # 一次 git log 同时取出 subject 与相对时间（用 \x1f 分隔），少起一个子进程
+    log_line = _git(["log", "-1", "--pretty=format:%s%x1f%cr"], wt)
+    if "\x1f" in log_line:
+        last_commit, last_commit_time = log_line.split("\x1f", 1)
+    else:
+        last_commit, last_commit_time = log_line, ""
     dirty = _git(["status", "--short"], wt)
     dirty_files = [l.strip() for l in dirty.splitlines() if l.strip()] if dirty else []
     try:
@@ -368,9 +375,9 @@ def _do_ingest_dir(directory: Path, recursive: bool = False):
     failed = []
     total = len(pdfs)
     _rag_progress(0, total)
+    from x_agent.rag import ingest_pdf   # 循环外导入一次
     for idx, pdf in enumerate(pdfs, 1):
         try:
-            from x_agent.rag import ingest_pdf
             n = ingest_pdf(str(pdf), source_type="upload")
             if n > 0:
                 ok += 1
@@ -565,6 +572,7 @@ def _do_baidu_sync(files: list):
     """后台线程：下载并入库勾选的百度网盘 PDF。"""
     _bdu_sync["status"] = "syncing"
     ok = failed = 0
+    from x_agent.rag import ingest_pdf   # 循环外导入一次
     for f in files:
         name  = f["name"]
         fs_id = f["fs_id"]
@@ -573,7 +581,6 @@ def _do_baidu_sync(files: list):
         try:
             dest = _bdu_download_pdf(fs_id, name)
             _bdu_log(f"  → 已保存到 books/{name}")
-            from x_agent.rag import ingest_pdf
             n = ingest_pdf(str(dest), source_type="netdisk")
             _bdu_log(f"  ✅ 入库 {n} 块")
             _bdu_mark_synced(fs_id)
@@ -675,14 +682,14 @@ def run_status():
 
 @app.get("/api/notes/{agent_id}")
 def get_note(agent_id: str):
-    if agent_id not in {a["id"] for a in AGENTS}:
+    if agent_id not in _AGENT_IDS:
         raise HTTPException(404)
     return {"content": _read_note(agent_id)}
 
 
 @app.post("/api/notes/{agent_id}")
 def save_note(agent_id: str, payload: NotePayload):
-    if agent_id not in {a["id"] for a in AGENTS}:
+    if agent_id not in _AGENT_IDS:
         raise HTTPException(404)
     _write_note(agent_id, payload.content)
     return {"ok": True}

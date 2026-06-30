@@ -51,6 +51,8 @@ def _signal_views(store, symbols: list[str], lookback_hours: int = 72) -> dict[s
         (since,),
     ).fetchall()
 
+    # symbols 转 set，成员判断由 O(n) 降到 O(1)
+    symbol_set = set(symbols)
     ticker_scores: dict[str, list[float]] = defaultdict(list)
     for tickers_json, score in rows:
         try:
@@ -59,7 +61,7 @@ def _signal_views(store, symbols: list[str], lookback_hours: int = 72) -> dict[s
             continue
         for tk in tickers:
             tk_clean = tk.lstrip("$").upper()
-            if tk_clean in symbols:
+            if tk_clean in symbol_set:
                 ticker_scores[tk_clean].append(float(score))
 
     views = {}

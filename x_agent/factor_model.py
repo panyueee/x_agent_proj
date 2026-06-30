@@ -311,7 +311,9 @@ def _load_mkt_cap_pl(conn, symbols: list[str]) -> "pl.DataFrame":
         "WHERE date = (SELECT MAX(date) FROM fundamentals) AND market_cap IS NOT NULL"
     ).fetchall()
 
-    cap_map: dict[str, float] = {r[0]: float(r[1]) for r in rows if r[0] in set(symbols)}
+    # symbols 集合只算一次，避免在循环/推导式中反复 set(symbols)
+    sym_set = set(symbols)
+    cap_map: dict[str, float] = {r[0]: float(r[1]) for r in rows if r[0] in sym_set}
 
     if len(cap_map) < len(symbols) * 0.5:
         import akshare as ak
@@ -319,7 +321,7 @@ def _load_mkt_cap_pl(conn, symbols: list[str]) -> "pl.DataFrame":
         for _, row in spot.iterrows():
             code = str(row.get("代码", "")).zfill(6)
             cap = row.get("总市值")
-            if code in set(symbols) and cap is not None:
+            if code in sym_set and cap is not None:
                 try:
                     cap_map[code] = float(cap)
                 except (TypeError, ValueError):
@@ -382,7 +384,8 @@ def _load_value_pl(conn, symbols: list[str], mkt_cap_df: "pl.DataFrame") -> "Opt
         "SELECT symbol, book_price FROM fundamentals "
         "WHERE date = (SELECT MAX(date) FROM fundamentals) AND book_price IS NOT NULL"
     ).fetchall()
-    bp_map = {r[0]: float(r[1]) for r in bp_rows if r[0] in set(symbols)}
+    sym_set = set(symbols)
+    bp_map = {r[0]: float(r[1]) for r in bp_rows if r[0] in sym_set}
 
     # sales_price = total_revenue / market_cap，从 quarterly_financials 取最新一期
     qf_rows = conn.execute(

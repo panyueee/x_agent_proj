@@ -113,9 +113,9 @@ class Signal:
     extracted: dict = field(default_factory=dict)   # LLM 抽取的结构化字段
 
 
-def _score(text: str, table: dict) -> int:
-    t = text.lower()
-    return sum(weight for kw, weight in table.items() if kw in t)
+def _score(text_lower: str, table: dict) -> int:
+    # 传入的 text_lower 必须已是小写，避免在 classify 中重复 .lower()
+    return sum(weight for kw, weight in table.items() if kw in text_lower)
 
 
 def _score_zh(text: str, table: dict) -> int:
@@ -130,12 +130,13 @@ def classify(tweet: Tweet) -> Signal:
         if spam_kw in text_lower:
             return Signal(tweet.id, "none", 0)
 
-    s_score = _score(tweet.text, STRATEGY_KEYWORDS) + _score_zh(tweet.text, STRATEGY_KEYWORDS_ZH)
-    w_score = _score(tweet.text, WEB3_KEYWORDS) + _score_zh(tweet.text, WEB3_KEYWORDS_ZH)
-    st_score = _score(tweet.text, STOCK_KEYWORDS) + _score_zh(tweet.text, STOCK_KEYWORDS_ZH)
-    f_score = _score(tweet.text, FINANCE_KEYWORDS) + _score_zh(tweet.text, FINANCE_KEYWORDS_ZH)
-    # A股股票代码（6位数字，0/3/6开头）命中也加分
-    if re.search(r'\b[036]\d{5}\b', tweet.text):
+    # text_lower 复用上面的 spam 检查结果，避免重复 .lower()
+    s_score = _score(text_lower, STRATEGY_KEYWORDS) + _score_zh(tweet.text, STRATEGY_KEYWORDS_ZH)
+    w_score = _score(text_lower, WEB3_KEYWORDS) + _score_zh(tweet.text, WEB3_KEYWORDS_ZH)
+    st_score = _score(text_lower, STOCK_KEYWORDS) + _score_zh(tweet.text, STOCK_KEYWORDS_ZH)
+    f_score = _score(text_lower, FINANCE_KEYWORDS) + _score_zh(tweet.text, FINANCE_KEYWORDS_ZH)
+    # A股股票代码（6位数字，0/3/6开头）命中也加分（复用已编译的 ASHARE_RE）
+    if ASHARE_RE.search(tweet.text):
         st_score += 1
         f_score += 1
 

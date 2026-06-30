@@ -50,9 +50,11 @@ def download(url: str, dest: Path, desc: str) -> bool:
 # ── 1. Reminiscences of a Stock Operator（公版）────────────────────────────────
 print("\n[1/2] Reminiscences of a Stock Operator（Edwin Lefèvre，1923，公版）")
 download(
-    # Gutenberg #60979 才是 Reminiscences；旧 ID 9840 实际指向另一本书（Vivian Grey）
-    url  = "https://www.gutenberg.org/cache/epub/60979/pg60979.pdf",
-    dest = BOOKS_DIR / "Reminiscences of a Stock Operator - Edwin Lefevre.pdf",
+    # Gutenberg #60979 才是 Reminiscences（旧 ID 9840 指向 Vivian Grey）；
+    # 该书 Gutenberg 只有 TXT/EPUB、无 PDF（pg60979.pdf 会 404），故下 TXT。
+    # 注意：TXT 不走 batch_ingest_books(只 glob PDF)，需用 rag.ingest_text 入库。
+    url  = "https://www.gutenberg.org/cache/epub/60979/pg60979.txt",
+    dest = BOOKS_DIR / "Reminiscences of a Stock Operator - Edwin Lefevre.txt",
     desc = "Reminiscences of a Stock Operator",
 )
 

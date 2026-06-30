@@ -325,23 +325,23 @@ def test_get_company_ic_parses_all_sections():
     assert by_name["子公司"].invest_amount == "1000"
 
 
-def test_get_company_ic_role_detection_ignores_typejoin():
-    """POSSIBLE BUG 记录：get_company_ic 的 role 仅看 staffTypeName(title)，
-    不看 typeJoin。即使 typeJoin 含「董事长」，只要 staffTypeName 不含关键词，
-    role 仍判为 executive。展示用 title 却优先取 typeJoin，二者口径不一致。
-    本测试断言「当前实际行为」以保持绿色，并在报告中标记为可疑点。"""
+def test_get_company_ic_role_detection_uses_typejoin():
+    """回归：get_company_ic 的 role 判定同时看 staffTypeName 与 typeJoin，
+    与展示 title(type_join or title) 口径一致。即使「董事长」只出现在 typeJoin、
+    staffTypeName 不含关键词，也应判为 legal_rep。
+    （此前为 bug：role 仅看 staffTypeName，会错判为 executive；已修复。）"""
     item = {
         "name": "工商公司",
         "creditCode": "CC",
         "staffList": [
-            # staffTypeName 不含董事长，typeJoin 含董事长 → 仍被判为 executive
+            # staffTypeName 不含董事长，typeJoin 含董事长 → 应判为 legal_rep
             {"name": "实为董事长", "staffTypeName": "高管", "typeJoin": ["董事长"]},
         ],
     }
     c = _tyc_client_with([_FakeResp(json_data={"error_code": 0, "result": item})])
     _, persons = c.get_company_ic("工商公司")
-    assert persons[0].role == "executive"      # 当前行为（疑似应为 legal_rep）
-    assert persons[0].title == "董事长"          # 展示 title 却用了 typeJoin
+    assert persons[0].role == "legal_rep"      # 修复后：typeJoin 含董事长即识别
+    assert persons[0].title == "董事长"          # 展示 title 取 typeJoin，与 role 一致
 
 
 def test_get_company_ic_empty_result():

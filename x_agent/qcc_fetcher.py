@@ -223,7 +223,10 @@ class TyanchaClient:
                 continue
             title = s.get("staffTypeName", "")
             type_join = ", ".join(s.get("typeJoin") or [])
-            role = "legal_rep" if "董事长" in title or "法定代表人" in title else "executive"
+            # 角色判定同时看 staffTypeName 与 typeJoin，与展示 title(type_join or title)
+            # 口径一致——否则"董事长"只出现在 typeJoin 时会被错判为 executive
+            role_src = f"{title} {type_join}"
+            role = "legal_rep" if "董事长" in role_src or "法定代表人" in role_src else "executive"
             persons.append(PersonInfo(name=name, role=role, title=type_join or title))
         for sh in item.get("shareHolderList") or []:
             name = sh.get("name", "")

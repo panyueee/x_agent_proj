@@ -892,7 +892,18 @@ async def baidu_callback(request: Request):
     """OAuth 回调：用 code 换 token，保存后重定向回看板。"""
     code = request.query_params.get("code", "")
     if not code:
-        return HTMLResponse("<h3>授权失败：未收到 code</h3>", status_code=400)
+        # 百度授权失败时会带 error / error_description 跳回（而非 code），显示出来便于排查
+        err  = request.query_params.get("error", "")
+        desc = request.query_params.get("error_description", "")
+        allqp = dict(request.query_params)
+        return HTMLResponse(
+            "<h3>授权失败：未收到 code</h3>"
+            f"<p><b>error:</b> {err or '(无)'} </p>"
+            f"<p><b>error_description:</b> {desc or '(无)'}</p>"
+            f"<p>回调收到的参数：<code>{allqp or '(空——可能是直接打开了回调地址，没经过百度授权)'}</code></p>"
+            "<p>最常见原因：百度应用后台的「授权回调地址」与 "
+            "<code>http://localhost:8765/api/baidu/callback</code> 不完全一致。</p>",
+            status_code=400)
     params = urllib.parse.urlencode({
         "grant_type":   "authorization_code",
         "code":          code,

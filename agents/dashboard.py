@@ -394,6 +394,26 @@ def _do_ingest_dir(directory: Path, recursive: bool = False):
     _rag_state["status"] = "done" if not failed else "error"
 
 
+# ── 知识库问答（RAG ask）──────────────────────────────────────────────────────
+# 复用单例 anthropic.Anthropic()（与 main.py 一致，从环境变量读取 ANTHROPIC_API_KEY），
+# 避免每次请求重建客户端。
+_anthropic_client = None
+_anthropic_lock = threading.Lock()
+
+
+def _get_anthropic_client():
+    """惰性构建并缓存 anthropic.Anthropic() 单例；未配置 key 时返回 None。"""
+    global _anthropic_client
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return None
+    if _anthropic_client is None:
+        with _anthropic_lock:
+            if _anthropic_client is None:
+                import anthropic
+                _anthropic_client = anthropic.Anthropic()
+    return _anthropic_client
+
+
 # ── 百度网盘 OAuth + 文件同步 ────────────────────────────────────────────────
 
 BAIDU_APP_KEY    = os.environ.get("BAIDU_APP_KEY", "")
@@ -806,6 +826,39 @@ def rag_log_stream():
                                       "X-Accel-Buffering": "no"})
 
 
+class RagAskPayload(BaseModel):
+    question:    str
+    top_k:       Optional[int] = None
+    # 默认查书籍库（source_type="book"）；显式传 null 则检索全部类型
+    source_type: Optional[str] = "book"
+
+
+@app.post("/api/rag/ask")
+def rag_ask(payload: RagAskPayload):
+    """对书籍知识库提问：检索 + Claude 生成回答。
+
+    同步端点，Starlette 会自动在线程池中执行，不会阻塞事件循环。
+    优雅降级：未配置 key / 知识库为空 / 生成失败时均返回 200 + 清晰 JSON。
+    """
+    question = (payload.question or "").strip()
+    if not question:
+        return {"answer": "请输入问题。", "sources": []}
+
+    try:
+        client = _get_anthropic_client()
+        if client is None:
+            return {"answer": "未配置 ANTHROPIC_API_KEY，无法生成回答", "sources": []}
+        from x_agent.rag import ask as _rag_ask
+        kwargs = {"source_type": payload.source_type}
+        if payload.top_k and payload.top_k > 0:
+            kwargs["top_k"] = payload.top_k
+        result = _rag_ask(question, client, **kwargs)
+        return {"answer": result.get("answer", ""),
+                "sources": result.get("sources", [])}
+    except Exception as e:
+        return {"answer": f"回答生成失败：{e}", "sources": []}
+
+
 @app.get("/api/baidu/status")
 def baidu_status():
     tok = _bdu_load_token()
@@ -1109,6 +1162,14 @@ textarea:focus { border-color:#3b82f6; }
   background:#1e293b; color:#94a3b8;
 }
 
+/* 知识库问答 */
+.ask-row { display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; }
+.ask-answer {
+  background:#0f1117; border:1px solid #2d3348; border-radius:8px;
+  padding:14px 16px; font-size:13.5px; line-height:1.7; color:#e2e8f0;
+  white-space:pre-wrap; word-break:break-word;
+}
+
 /* 拖拽上传区域 */
 .drop-zone {
   border:2px dashed #2d3348; border-radius:10px;
@@ -1307,6 +1368,23 @@ textarea:focus { border-color:#3b82f6; }
 
     <!-- 本地入库日志 -->
     <div class="rag-log" id="rag-log"><span style="color:#475569">等待操作...</span></div>
+  </div>
+</div>
+
+<!-- ── 知识库问答面板 ── -->
+<div class="rag-panel">
+  <div class="rag-header">
+    <span class="rag-title">📖 知识库问答</span>
+  </div>
+  <div class="rag-body">
+    <div class="ask-row">
+      <textarea id="ask-input" style="flex:1"
+                placeholder="向书籍知识库提问，例如：价值投资的核心原则是什么？（Cmd/Ctrl+Enter 提交）"
+                onkeydown="if(event.key==='Enter'&&(event.metaKey||event.ctrlKey))askKb()"></textarea>
+      <button class="btn-sm primary" id="btn-ask" onclick="askKb()">提问</button>
+    </div>
+    <div class="ask-answer" id="ask-answer" style="display:none"></div>
+    <div class="rag-type-row" id="ask-sources"></div>
   </div>
 </div>
 
@@ -1806,6 +1884,45 @@ async function bduAutoRunNow() {
     logEl.appendChild(div);
     logEl.scrollTop = logEl.scrollHeight;
   };
+}
+
+// ── 知识库问答 ────────────────────────────────────────────────────────────────
+
+async function askKb() {
+  const inp = document.getElementById('ask-input');
+  const q = inp.value.trim();
+  if (!q) return;
+  const btn   = document.getElementById('btn-ask');
+  const ansEl = document.getElementById('ask-answer');
+  const srcEl = document.getElementById('ask-sources');
+  btn.disabled = true; btn.textContent = '思考中...';
+  ansEl.style.display = 'block';
+  ansEl.textContent = '正在检索知识库并生成回答...';
+  srcEl.innerHTML = '';
+  try {
+    const r = await fetch('/api/rag/ask', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({question: q})
+    });
+    const d = await r.json();
+    ansEl.textContent = d.answer || '（无回答）';
+    const sources = d.sources || [];
+    srcEl.innerHTML = sources.map(s => {
+      let label = s.title || '未知来源';
+      if (s.page_start) {
+        label += (s.page_end && s.page_end !== s.page_start)
+          ? ` p.${s.page_start}-${s.page_end}` : ` p.${s.page_start}`;
+      }
+      const div = document.createElement('span');
+      div.className = 'rag-type-tag';
+      div.textContent = '📄 ' + label;
+      return div.outerHTML;
+    }).join('');
+  } catch(e) {
+    ansEl.textContent = '请求失败：' + e;
+  } finally {
+    btn.disabled = false; btn.textContent = '提问';
+  }
 }
 
 // ── 主循环 ────────────────────────────────────────────────────────────────────

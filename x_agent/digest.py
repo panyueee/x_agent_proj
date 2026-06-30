@@ -5,6 +5,54 @@ import json
 import datetime as dt
 
 
+# 是否给摘要的头部信号附加「相关投资原理」书籍注解。
+# 纯本地检索（rag.retrieve，BM25/FTS5），不触发 LLM、不需要任何 API key。
+# 想整体关掉直接把这里改成 False，或调 build_digest(annotate_books=False)。
+BOOK_ANNOTATION_ENABLED = True
+
+
+def _book_annotation(query: str, top_k: int = 2, min_score: float = 0.01) -> str:
+    """从书籍知识库检索与 query 相关的投资原理，格式化为简短 Markdown 引用块。
+
+    走 rag.retrieve(..., source_type="book")，纯检索、不调用 LLM、无需 API key。
+    返回形如：
+
+        > 📚 **相关投资原理**
+        > 截断后的片段…  —— 《书名》 by 作者
+
+    知识库缺失/为空、rag 导入失败、无命中或得分过低时一律返回 ""，
+    调用方据此跳过注解，摘要其余部分行为完全不变。
+    """
+    try:
+        from x_agent import rag
+        # 书库为空就别查了，省得做无用功
+        if rag.collection_stats().get("by_type", {}).get("book", 0) == 0:
+            return ""
+        hits = rag.retrieve(query, top_k=top_k, source_type="book")
+    except Exception:
+        # rag 不可用 / DB 缺失或被锁 / 检索异常 —— 一律降级为无注解
+        return ""
+
+    quotes = []
+    for h in hits[:top_k]:
+        if h.get("score", 0.0) < min_score:
+            continue
+        # 清掉换行/多余空白，截成一行短摘要
+        snippet = " ".join((h.get("content") or "").split())[:150].strip()
+        if not snippet:
+            continue
+        meta = h.get("meta", {}) or {}
+        # 入库时书名常为「书名 — 章节」，注解只取书名部分更干净
+        title = (meta.get("title") or "").split(" — ")[0].strip() or "未知来源"
+        author = (meta.get("author") or "").strip()
+        attribution = f"《{title}》" + (f" by {author}" if author else "")
+        quotes.append(f"> {snippet}…  —— {attribution}")
+
+    if not quotes:
+        return ""
+    return "\n".join(["> 📚 **相关投资原理**"] + quotes)
+
+
 def _format_pct(pct: float) -> str:
     """格式化涨跌幅，加上 + / - 符号和颜色前缀（纯文本用箭头区分）。"""
     if pct >= 0:
@@ -263,7 +311,11 @@ def _factor_section(store) -> list:
     return lines
 
 
-def build_digest(store, path: str) -> str:
+def build_digest(store, path: str, annotate_books: bool | None = None) -> str:
+    # annotate_books=None 时沿用模块级开关 BOOK_ANNOTATION_ENABLED；
+    # 显式传 True/False 可临时覆盖，便于按调用方需求开关书籍注解。
+    do_annotate = BOOK_ANNOTATION_ENABLED if annotate_books is None else annotate_books
+
     rows = store.recent_signals(["strategy", "web3", "both"], limit=80)
     strat = [r for r in rows if r[4] in ("strategy", "both")]
     web3 = [r for r in rows if r[4] in ("web3", "both")]
@@ -286,6 +338,12 @@ def build_digest(store, path: str) -> str:
             if ex.get("thesis"):
                 lines.append(f"  - 逻辑：{ex['thesis']}")
         lines.append(f"  - {url}")
+    # ── 头部策略信号附一段书籍投资原理（可选，无命中则不输出）──
+    if do_annotate and strat:
+        note = _book_annotation(strat[0][1])
+        if note:
+            lines.append("")
+            lines.append(note)
     lines.append("")
 
     lines.append(f"## 🌐 Web3 资讯（{len(web3)} 条）")
@@ -294,6 +352,12 @@ def build_digest(store, path: str) -> str:
         lines.append(f"- **@{author}** · 评分 {score}")
         lines.append(f"  > {text.strip()[:240]}")
         lines.append(f"  - {url}")
+    # ── 头部 Web3 信号附一段书籍投资原理（可选，无命中则不输出）──
+    if do_annotate and web3:
+        note = _book_annotation(web3[0][1])
+        if note:
+            lines.append("")
+            lines.append(note)
     lines.append("")
 
     # ---- 市场行情板块（从 price_bars 表读取）----

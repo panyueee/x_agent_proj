@@ -222,8 +222,8 @@ def process_group(sess, gid: str, gname: str, done: set[str],
                 stat["skipped_nonpdf"] += 1
                 print(f"[跳过非PDF] {name!r} (file_id={file_id})", file=sys.stderr)
                 continue
-            # 每个文件单独构建标题（含报告名）：日期·主题·报告名 + 来源作者
-            title, author = build_pdf_meta(topic, gname, name)
+            # 标题下载前即可算（日期·主题·报告名）；来源(author)下载后从PDF内容识别
+            title = build_title(topic, name)
 
             stat["pdf_found"] += 1
             source_id = build_source_id(gid, topic_id, file_id)
@@ -260,6 +260,8 @@ def process_group(sess, gid: str, gname: str, done: set[str],
             tmp_pdf = TMP_DIR / f"_zsxq_tmp_{file_id}.pdf"
             try:
                 download_to(dl_url, tmp_pdf, auth_sess=sess)
+                # 来源：从下载好的PDF内容识别出品机构(BofA/大摩/华创…)，识别不到退回渠道
+                author = resolve_source(str(tmp_pdf), gname)
                 n = ingest_pdf(
                     str(tmp_pdf),
                     title=title,
@@ -298,18 +300,75 @@ def _topic_theme(topic: dict) -> str:
     return clean_text(talk.get("text") or "").strip()
 
 
-def build_pdf_meta(topic: dict, gname: str, file_name: str) -> tuple[str, str]:
-    """构建 PDF 入库的 (title, author)，标注好【日期·主题·报告名】与【来源】。
+# 研报机构识别表：(规范名, [小写匹配模式…])。来源=从PDF内容解析出的出品机构，
+# 而非"知识星球"这个渠道（渠道已由 source_type=zsxq + source_id 记录）。
+RESEARCH_FIRMS = [
+    ("BofA Securities", ["bofa securities", "merrill lynch", "bank of america"]),
+    ("Morgan Stanley", ["morgan stanley"]),
+    ("Goldman Sachs", ["goldman sachs"]),
+    ("J.P. Morgan", ["j.p. morgan", "jpmorgan", "jp morgan"]),
+    ("UBS", ["ubs securities", "ubs ag", "ubs limited"]),
+    ("Citi", ["citigroup", "citi research", "citibank"]),
+    ("Nomura", ["nomura"]),
+    ("Jefferies", ["jefferies"]),
+    ("Barclays", ["barclays"]),
+    ("HSBC", ["hsbc"]),
+    ("Macquarie", ["macquarie"]),
+    ("Daiwa", ["daiwa"]),
+    ("Mizuho", ["mizuho"]),
+    ("Deutsche Bank", ["deutsche bank"]),
+    ("Credit Suisse", ["credit suisse"]),
+    ("Bernstein", ["bernstein"]),
+    ("Wolfe Research", ["wolfe research"]),
+    ("华创证券", ["华创证券"]),
+    ("中泰证券", ["中泰证券"]),
+    ("中金公司", ["中金公司", "china international capital"]),
+    ("国泰君安", ["国泰君安"]),
+    ("中信证券", ["中信证券"]),
+    ("招商证券", ["招商证券"]),
+    ("广发证券", ["广发证券"]),
+]
 
-    ingest_pdf 只接受 title/author，故把 日期+主题+报告名 编进 title，来源放 author。
-    title = "YYYY-MM-DD · <主题> · <报告名>"；author = "知识星球·<星球名>"。
-    """
+
+def detect_firm(text: str) -> str | None:
+    """从研报文字（通常首页页眉/免责声明）识别出品机构。命中返回规范名，否则 None。"""
+    low = (text or "").lower()
+    for name, pats in RESEARCH_FIRMS:
+        if any(p in low for p in pats):
+            return name
+    return None
+
+
+def pdf_head_text(path: str, max_pages: int = 2, max_chars: int = 4000) -> str:
+    """取 PDF 前 max_pages 页的文字层（文字型PDF直接可得；扫描型返回空→来源退回渠道）。"""
+    try:
+        import fitz
+        doc = fitz.open(path)
+        parts = []
+        for i in range(min(max_pages, doc.page_count)):
+            parts.append(doc.load_page(i).get_text())
+            if sum(len(p) for p in parts) >= max_chars:
+                break
+        doc.close()
+        return "".join(parts)[:max_chars]
+    except Exception:
+        return ""
+
+
+def build_title(topic: dict, file_name: str) -> str:
+    """title = "YYYY-MM-DD · <主题(剥<e>标签)> · <报告名>"。"""
     date = _topic_date(topic)
     theme = _topic_theme(topic)
     stem = re.sub(r"\.pdf$", "", file_name, flags=re.I).strip()
-    title = " · ".join(x for x in [date, theme[:60], stem] if x)[:200]
-    author = f"知识星球·{gname}" if gname else "知识星球"
-    return title, author
+    return " · ".join(x for x in [date, theme[:60], stem] if x)[:200]
+
+
+def resolve_source(pdf_path: str, gname: str) -> str:
+    """来源(author)：优先从PDF内容识别出的研报机构；识别不到退回渠道"知识星球·<星球名>"。"""
+    firm = detect_firm(pdf_head_text(pdf_path))
+    if firm:
+        return firm
+    return f"知识星球·{gname}" if gname else "知识星球"
 
 
 def resolve_group_names(sess, gids: list[str]) -> dict[str, str]:
@@ -407,11 +466,18 @@ def run_selftest() -> int:
     assert parse_download_url(FAKE_DL_RESP_URL) == "https://oss.example.com/y.pdf", "url 兜底解析错误"
     assert parse_download_url(FAKE_DL_RESP_EMPTY) is None, "空响应应返回 None"
 
-    # 6) 元数据构建：主题(剥标签)+报告名 编入 title；来源放 author
-    title, author = build_pdf_meta(SELFTEST_TOPICS[0], "测试星球", "报告A.pdf")
+    # 6) title 构建：主题(剥标签)+报告名 编入
+    title = build_title(SELFTEST_TOPICS[0], "报告A.pdf")
     assert "本周研报合集" in title, f"主题未进标题：{title!r}"
     assert "报告A" in title and "报告A.pdf" not in title, f"报告名处理错误：{title!r}"
-    assert author == "知识星球·测试星球", f"来源作者错误：{author!r}"
+
+    # 7) 来源=从PDF内容识别机构；识别不到退回渠道
+    assert detect_firm("... BofA Securities does and seeks to do business ...") == "BofA Securities"
+    assert detect_firm("摩根士丹利 Morgan Stanley Research") == "Morgan Stanley"
+    assert detect_firm("华创证券研究所 宏观") == "华创证券"
+    assert detect_firm("这是一段没有机构名的普通文字") is None
+    # resolve_source 无法命中(空文本路径)时退回渠道
+    assert detect_firm(pdf_head_text("/不存在的路径.pdf")) is None
 
     print("全部断言通过 ✅（仅离线样例，未联网实测真实 zsxq API）")
     return 0

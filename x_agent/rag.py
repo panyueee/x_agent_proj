@@ -37,6 +37,15 @@ TOP_K          = 6      # 默认返回条数
 VOYAGE_MODEL   = "voyage-finance-2"
 VOYAGE_BATCH   = 128    # Voyage API 单批最大条数
 
+# Embedding 后端：voyage(付费API) | bge(免费本地 bge-m3, 推荐在 M5/Apple Silicon 上跑)。
+# 私有付费内容(研报/知识星球/公众号)走 bge 本地不外泄；EMBED_BACKEND=bge 切换。
+EMBED_BACKEND  = os.getenv("EMBED_BACKEND", "voyage").lower()
+BGE_MODEL      = os.getenv("BGE_MODEL", "BAAI/bge-m3")   # 1024维, 中文/多语检索标杆, 免费
+BGE_BATCH      = int(os.getenv("BGE_BATCH", "64"))
+# 当前激活的 embedding 模型名——写入/检索/embed-all 都用它区分 LanceDB 里的向量
+ACTIVE_EMBED_MODEL = BGE_MODEL if EMBED_BACKEND == "bge" else VOYAGE_MODEL
+EMBED_BATCH    = BGE_BATCH if EMBED_BACKEND == "bge" else VOYAGE_BATCH
+
 
 # ── SQLite 初始化 ─────────────────────────────────────────────────────────────
 
@@ -533,15 +542,10 @@ def _voyage_client():
     return _local.voyage
 
 
-def embed_texts(texts: list[str]) -> list[list[float]] | None:
-    """
-    调用 Voyage AI 批量生成 embedding。texts 可任意长，内部自动分批。
-    返回 None 表示 Voyage 不可用（VOYAGE_API_KEY 未设置或未安装 voyageai）。
-    """
+def _voyage_embed_texts(texts: list[str]) -> list[list[float]] | None:
     client = _voyage_client()
     if client is None:
         return None
-
     all_embeddings = []
     for i in range(0, len(texts), VOYAGE_BATCH):
         batch = texts[i: i + VOYAGE_BATCH]
@@ -554,8 +558,53 @@ def embed_texts(texts: list[str]) -> list[list[float]] | None:
     return all_embeddings
 
 
+def _bge_model():
+    """返回 bge-m3 SentenceTransformer 单例（懒加载）。Apple Silicon 自动用 MPS 加速。"""
+    if not hasattr(_local, "bge"):
+        try:
+            from sentence_transformers import SentenceTransformer
+            device = None
+            try:
+                import torch
+                if torch.backends.mps.is_available():
+                    device = "mps"          # M5/Apple Silicon GPU
+                elif torch.cuda.is_available():
+                    device = "cuda"
+            except Exception:
+                pass
+            _local.bge = SentenceTransformer(BGE_MODEL, device=device)
+        except Exception as e:
+            print(f"[rag] bge-m3 加载失败（需 pip install sentence-transformers torch）: {e}")
+            _local.bge = None
+    return _local.bge
+
+
+def _bge_embed(texts: list[str]) -> list[list[float]] | None:
+    """bge-m3 本地批量编码。bge-m3 无需 query/document 指令前缀，归一化后返回。"""
+    model = _bge_model()
+    if model is None:
+        return None
+    try:
+        vecs = model.encode(texts, batch_size=BGE_BATCH, normalize_embeddings=True,
+                            show_progress_bar=False, convert_to_numpy=True)
+        return [v.tolist() for v in vecs]
+    except Exception as e:
+        print(f"[rag] bge-m3 编码失败: {e}")
+        return None
+
+
+def embed_texts(texts: list[str]) -> list[list[float]] | None:
+    """批量生成文档 embedding。按 EMBED_BACKEND 分发；不可用返回 None。"""
+    if EMBED_BACKEND == "bge":
+        return _bge_embed(texts)
+    return _voyage_embed_texts(texts)
+
+
 def embed_query(query: str) -> list[float] | None:
-    """对检索 query 生成 embedding（input_type='query'，与 document 略有区别）。"""
+    """对检索 query 生成 embedding。按 EMBED_BACKEND 分发。"""
+    if EMBED_BACKEND == "bge":
+        r = _bge_embed([query])
+        return r[0] if r else None
     client = _voyage_client()
     if client is None:
         return None
@@ -651,7 +700,7 @@ def upsert_vectors(chunk_ids: list[str], texts: list[str],
                 "chunk_id":    cid,
                 "source_type": st,
                 "title":       ti,
-                "embed_model": VOYAGE_MODEL,
+                "embed_model": ACTIVE_EMBED_MODEL,
                 "vector":      [float(v) for v in emb],
             }
             for cid, st, ti, emb in zip(chunk_ids, source_types, titles, embeddings)
@@ -680,7 +729,7 @@ def retrieve_vector(query: str, top_k: int = TOP_K_VECTOR,
 
     try:
         # embed_model 过滤保证换模型后旧向量不参与检索
-        model_filter = f"embed_model = '{VOYAGE_MODEL}'"
+        model_filter = f"embed_model = '{ACTIVE_EMBED_MODEL}'"
         where = f"{model_filter} AND source_type = '{source_type}'" if source_type else model_filter
         q = table.search(qvec).where(where, prefilter=True).limit(top_k)
         rows = q.to_list()
@@ -1037,13 +1086,13 @@ if __name__ == "__main__":
                 ds  = table.to_lance()
                 arr = ds.to_table(
                     columns=["chunk_id", "embed_model"],
-                    filter=pc.field("embed_model") == VOYAGE_MODEL,
+                    filter=pc.field("embed_model") == ACTIVE_EMBED_MODEL,
                 )
                 existing_ids = set(arr.column("chunk_id").to_pylist())
                 # 统计旧模型向量（不过滤就全读 chunk_id+embed_model，两列都是字符串，开销很小）
                 all_arr = ds.to_table(columns=["chunk_id", "embed_model"])
                 old_count = sum(1 for v in all_arr.column("embed_model").to_pylist()
-                                if v != VOYAGE_MODEL)
+                                if v != ACTIVE_EMBED_MODEL)
                 if old_count:
                     print(f"[embed-all] 检测到 {old_count} 条旧模型向量，将补跑")
             except Exception as e:
@@ -1057,7 +1106,7 @@ if __name__ == "__main__":
 
         written = scanned = skipped = 0
         while True:
-            rows = cur.fetchmany(VOYAGE_BATCH)
+            rows = cur.fetchmany(EMBED_BATCH)
             if not rows:
                 break
             scanned += len(rows)

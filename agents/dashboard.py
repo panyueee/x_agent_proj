@@ -1970,14 +1970,20 @@ async function askKb() {
     ansEl.textContent = d.answer || '（无回答）';
     // K线图：命中标的时展示 echo 说明 + 图片（图片按需渲染并缓存）
     const chartEl = document.getElementById('ask-chart');
+    chartEl.innerHTML = '';
     if (d.chart && d.chart.url) {
       chartEl.style.display = 'block';
-      chartEl.innerHTML = '<div style="font-size:13px;color:#8b95a5;margin-bottom:6px">📈 ' +
-        (d.chart.echo || '') + '</div>' +
-        '<img src="' + d.chart.url + '" style="max-width:100%;border-radius:8px" ' +
-        'onerror="this.parentNode.innerHTML=\'<span style=color:#c66>图表渲染失败</span>\'">';
+      const cap = document.createElement('div');
+      cap.style.cssText = 'font-size:13px;color:#8b95a5;margin-bottom:6px';
+      cap.textContent = '📈 ' + (d.chart.echo || '');
+      const img = document.createElement('img');
+      img.src = d.chart.url;
+      img.style.cssText = 'max-width:100%;border-radius:8px';
+      img.onerror = function(){ chartEl.innerHTML = '<span style="color:#c66">图表渲染失败</span>'; };
+      chartEl.appendChild(cap);
+      chartEl.appendChild(img);
     } else {
-      chartEl.style.display = 'none'; chartEl.innerHTML = '';
+      chartEl.style.display = 'none';
     }
     const sources = d.sources || [];
     srcEl.innerHTML = sources.map(s => {

@@ -1,0 +1,38 @@
+# WeWe RSS —— 微信公众号 → 全文 RSS 中转服务（自建）
+#
+# 用法：
+#   docker compose -f docker-compose.wewe-rss.yml up -d
+#   浏览器打开 http://localhost:4000 → 用下方 AUTH_CODE 登录管理页
+#   → 「账号管理」用微信读书 App 扫码登录（只读 token）
+#   → 添加公众号「一瑜中的」「李迅雷金融与投资」
+#   → 复制生成的 RSS 地址（形如 http://localhost:4000/feeds/<id>.atom）填进 data/wechat_feeds.txt
+#
+# 这里用 SQLite 版镜像（单用户自建最省事，无需额外起 MySQL）。
+# 官方另有 MySQL 版 cooderl/wewe-rss:latest，需配套 db 服务，见项目 README。
+#
+# 详见 docs/wewe_rss_setup.md
+
+services:
+  wewe-rss:
+    image: cooderl/wewe-rss-sqlite:latest
+    container_name: wewe-rss
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      # 管理页登录/接口鉴权码 —— 上线务必改成自己的强口令
+      AUTH_CODE: "change_me_please"
+      # SQLite 数据库（持久化到下方挂载的 ./wewe-rss-data 卷）
+      DATABASE_TYPE: "sqlite"
+      DATABASE_URL: "file:../data/wewe-rss.db"
+      # 生成 RSS 链接时用的对外地址；若从别的机器访问请改成实际 IP/域名
+      SERVER_ORIGIN_URL: "http://localhost:4000"
+      # 输出全文（本入库脚本依赖 content:encoded 全文，务必 fulltext）
+      FEED_MODE: "fulltext"
+      # 抓取更新计划（默认每天 5:35 和 17:35），按需调整
+      CRON_EXPRESSION: "35 5,17 * * *"
+      # 每次抓取间隔，避免过快被限流
+      UPDATE_DELAY_TIME: "60s"
+    volumes:
+      # SQLite 数据文件 + 微信读书 token 持久化，容器重建不丢登录态
+      - ./wewe-rss-data:/app/data

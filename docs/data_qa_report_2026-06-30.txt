@@ -1,0 +1,86 @@
+/Users/pany19/Documents/x_agent_proj/scripts/data_qa.py:41: UserWarning: Could not infer format, so each element will be parsed individually, falling back to `dateutil`. To ensure parsing is consistent and as-expected, please specify a format.
+  dts = pd.to_datetime(df[dc], errors="coerce").dropna().sort_values()
+/Users/pany19/Documents/x_agent_proj/scripts/data_qa.py:41: UserWarning: Could not infer format, so each element will be parsed individually, falling back to `dateutil`. To ensure parsing is consistent and as-expected, please specify a format.
+  dts = pd.to_datetime(df[dc], errors="coerce").dropna().sort_values()
+/Users/pany19/Documents/x_agent_proj/scripts/data_qa.py:41: UserWarning: Could not infer format, so each element will be parsed individually, falling back to `dateutil`. To ensure parsing is consistent and as-expected, please specify a format.
+  dts = pd.to_datetime(df[dc], errors="coerce").dropna().sort_values()
+/Users/pany19/Documents/x_agent_proj/scripts/data_qa.py:41: UserWarning: Could not infer format, so each element will be parsed individually, falling back to `dateutil`. To ensure parsing is consistent and as-expected, please specify a format.
+  dts = pd.to_datetime(df[dc], errors="coerce").dropna().sort_values()
+/Users/pany19/Documents/x_agent_proj/scripts/data_qa.py:41: UserWarning: Could not infer format, so each element will be parsed individually, falling back to `dateutil`. To ensure parsing is consistent and as-expected, please specify a format.
+  dts = pd.to_datetime(df[dc], errors="coerce").dropna().sort_values()
+/Users/pany19/Documents/x_agent_proj/scripts/data_qa.py:41: UserWarning: Could not infer format, so each element will be parsed individually, falling back to `dateutil`. To ensure parsing is consistent and as-expected, please specify a format.
+  dts = pd.to_datetime(df[dc], errors="coerce").dropna().sort_values()
+/Users/pany19/Documents/x_agent_proj/scripts/data_qa.py:41: UserWarning: Could not infer format, so each element will be parsed individually, falling back to `dateutil`. To ensure parsing is consistent and as-expected, please specify a format.
+  dts = pd.to_datetime(df[dc], errors="coerce").dropna().sort_values()
+/Users/pany19/Documents/x_agent_proj/scripts/data_qa.py:41: UserWarning: Could not infer format, so each element will be parsed individually, falling back to `dateutil`. To ensure parsing is consistent and as-expected, please specify a format.
+  dts = pd.to_datetime(df[dc], errors="coerce").dropna().sort_values()
+数据体检 @ 2026-07-01（今日）
+======================================================================
+
+📁 stock_history/a
+   文件 5535 | 空/占位 70 | 读失败 0 | 行数 中位2548/最少3
+   末日Top3: [('2026-06-30', 5192), ('2005-09-21', 4), ('2024-07-03', 3)] | 末日≥6/25(新鲜)占 5196/5465
+   ⚠ 大断档(>40天) 2个, 例: [('sz.300161.parquet', 66), ('sz.000979.parquet', 162)]
+
+📁 stock_history/hk
+   文件 2788 | 空/占位 27 | 读失败 0 | 行数 中位2835/最少1
+   末日Top3: [('2026-06-29', 2756), ('2026-06-26', 5)] | 末日≥6/25(新鲜)占 2761/2761
+   ⚠ 大断档(>40天) 22个, 例: [('1486.HK.parquet', 300), ('6136.HK.parquet', 98), ('1446.HK.parquet', 98)]
+
+📁 stock_history/us
+   文件 12899 | 空/占位 2817 | 读失败 0 | 行数 中位1383/最少1
+   末日Top3: [('2026-06-29', 9953), ('2026-06-26', 88), ('2026-06-30', 9)] | 末日≥6/25(新鲜)占 10059/10082
+   ⚠ 全零列: {'volume': 73, 'open': 5}
+   ⚠ 大断档(>40天) 6个, 例: [('BEC.parquet', 411), ('SMCC.parquet', 154), ('CAPNR.parquet', 45)]
+
+📁 futures_history/cn
+   文件 76 | 空/占位 0 | 读失败 0 | 行数 中位2731/最少440
+   末日Top3: [('2026-06-30', 72), ('2026-06-02', 1), ('2023-02-28', 1)] | 末日≥6/25(新鲜)占 72/76
+   ⚠ 全零列: {'settle': 2}
+   ⚠ 大断档(>40天) 6个, 例: [('BB0.parquet', 681), ('WH0.parquet', 56), ('ZC0.parquet', 58)]
+
+📁 futures_history/global
+   文件 30 | 空/占位 0 | 读失败 0 | 行数 中位6483/最少979
+   末日Top3: [('2026-06-30', 29), ('2023-05-15', 1)] | 末日≥6/25(新鲜)占 29/30
+   ⚠ 大断档(>40天) 2个, 例: [('PL_F.parquet', 78), ('PA_F.parquet', 64)]
+
+📁 fx_history
+   文件 21 | 空/占位 0 | 读失败 0 | 行数 中位5872/最少4705
+   末日Top3: [('2026-07-01', 20), ('2026-06-30', 1)] | 末日≥6/25(新鲜)占 21/21
+   ⚠ 全零列: {'volume': 20}
+   ⚠ 大断档(>40天) 3个, 例: [('USDHKD_X.parquet', 214), ('USDCNY_X.parquet', 216), ('USDTWD_X.parquet', 574)]
+
+📁 bond_history
+   文件 6 | 空/占位 0 | 读失败 0 | 行数 中位6655/最少6655
+   末日Top3: [('2026-06-30', 6)] | 末日≥6/25(新鲜)占 6/6
+
+📁 crypto_history
+   文件 20 | 空/占位 0 | 读失败 0 | 行数 中位3155/最少1311
+   末日Top3: [('2026-06-29', 16), ('2026-07-01', 2), ('2025-03-24', 1)] | 末日≥6/25(新鲜)占 18/20
+   ⚠ 大断档(>40天) 1个, 例: [('AVAX-USD.parquet', 70)]
+
+📁 index_history
+   文件 17 | 空/占位 0 | 读失败 0 | 行数 中位6525/最少1284
+   末日Top3: [('2026-06-30', 17)] | 末日≥6/25(新鲜)占 17/17
+   ⚠ 全零列: {'volume': 1}
+
+📁 etf_history
+   文件 53 | 空/占位 0 | 读失败 0 | 行数 中位2144/最少1082
+   末日Top3: [('2026-06-30', 53)] | 末日≥6/25(新鲜)占 53/53
+
+📁 reits_history/history
+   文件 86 | 空/占位 0 | 读失败 0 | 行数 中位427/最少8
+   末日Top3: [('?', 86)] | 末日≥6/25(新鲜)占 86/86
+
+📁 cb_history
+   文件 17 | 空/占位 0 | 读失败 0 | 行数 中位1110/最少250
+   末日Top3: [('2026-06-30', 6), ('2024-12-03', 1), ('2025-10-22', 1)] | 末日≥6/25(新鲜)占 7/17
+   ⚠ 大断档(>40天) 1个, 例: [('bond_zh_cov.parquet', 365)]
+
+📁 macro_history/fred
+   文件 55 | 空/占位 0 | 读失败 0 | 行数 中位1049/最少13
+   末日Top3: [('2026-05-01', 24), ('2026-06-29', 10), ('2026-06-26', 6)] | 末日≥6/25(新鲜)占 22/55
+   ⚠ 大断档(>40天) 8个, 例: [('CIVPART.parquet', 61), ('GDPC1.parquet', 92), ('CPIAUCSL.parquet', 61)]
+
+======================================================================
+体检完成

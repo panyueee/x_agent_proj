@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -59,7 +60,7 @@ except Exception:  # certifi 缺失也不致命
 import requests  # noqa: E402  （放在证书设置之后 import）
 
 # 复用 scripts/ingest_zsxq.py 的已验证 helper（cookie 鉴权、限流退避 GET、翻页）
-from ingest_zsxq import make_session, api_get, iter_topics  # noqa: E402
+from ingest_zsxq import make_session, api_get, iter_topics, clean_text  # noqa: E402
 # PDF 入库复用 rag.ingest_pdf（内部含 文字型/扫描型判定 + 去重 + 断点续传）
 from x_agent.rag import ingest_pdf  # noqa: E402
 
@@ -210,7 +211,6 @@ def process_group(sess, gid: str, gname: str, done: set[str],
     for topic in iter_topics(sess, gid, limit):
         stat["topics"] += 1
         topic_id = topic.get("topic_id")
-        title, _ = _topic_title(topic)
 
         for file in topic_files(topic):
             file_id = pick_file_id(file)
@@ -222,6 +222,8 @@ def process_group(sess, gid: str, gname: str, done: set[str],
                 stat["skipped_nonpdf"] += 1
                 print(f"[跳过非PDF] {name!r} (file_id={file_id})", file=sys.stderr)
                 continue
+            # 每个文件单独构建标题（含报告名）：日期·主题·报告名 + 来源作者
+            title, author = build_pdf_meta(topic, gname, name)
 
             stat["pdf_found"] += 1
             source_id = build_source_id(gid, topic_id, file_id)
@@ -261,7 +263,7 @@ def process_group(sess, gid: str, gname: str, done: set[str],
                 n = ingest_pdf(
                     str(tmp_pdf),
                     title=title,
-                    author=gname,
+                    author=author,
                     source_id=source_id,
                     source_type="zsxq",
                     use_ocr=True,
@@ -285,16 +287,29 @@ def process_group(sess, gid: str, gname: str, done: set[str],
     return stat
 
 
-def _topic_title(topic: dict) -> tuple[str, str]:
-    """尽力取一个帖子标题（用作 PDF title）。无则用附件所属帖 id 兜底。"""
+def _topic_date(topic: dict) -> str:
+    """帖子发布日期 YYYY-MM-DD（取 create_time 前 10 位）。"""
+    return (topic.get("create_time") or "")[:10]
+
+
+def _topic_theme(topic: dict) -> str:
+    """帖子主题：正文剥 <e> 标签/解实体后的干净文字（clean_text）。"""
     talk = topic.get("talk") or {}
-    text = (talk.get("text") or "").strip()
-    if text:
-        # 取正文首行前 40 字作标题（不做复杂清洗，附件入库标题够用即可）
-        first = text.splitlines()[0]
-        return first[:40], text
-    tid = topic.get("topic_id")
-    return f"zsxq topic {tid}", ""
+    return clean_text(talk.get("text") or "").strip()
+
+
+def build_pdf_meta(topic: dict, gname: str, file_name: str) -> tuple[str, str]:
+    """构建 PDF 入库的 (title, author)，标注好【日期·主题·报告名】与【来源】。
+
+    ingest_pdf 只接受 title/author，故把 日期+主题+报告名 编进 title，来源放 author。
+    title = "YYYY-MM-DD · <主题> · <报告名>"；author = "知识星球·<星球名>"。
+    """
+    date = _topic_date(topic)
+    theme = _topic_theme(topic)
+    stem = re.sub(r"\.pdf$", "", file_name, flags=re.I).strip()
+    title = " · ".join(x for x in [date, theme[:60], stem] if x)[:200]
+    author = f"知识星球·{gname}" if gname else "知识星球"
+    return title, author
 
 
 def resolve_group_names(sess, gids: list[str]) -> dict[str, str]:
@@ -392,9 +407,11 @@ def run_selftest() -> int:
     assert parse_download_url(FAKE_DL_RESP_URL) == "https://oss.example.com/y.pdf", "url 兜底解析错误"
     assert parse_download_url(FAKE_DL_RESP_EMPTY) is None, "空响应应返回 None"
 
-    # 6) 标题抽取（用作 PDF title）
-    t, _ = _topic_title(SELFTEST_TOPICS[0])
-    assert t == "本周研报合集，见附件。", f"标题抽取错误：{t!r}"
+    # 6) 元数据构建：主题(剥标签)+报告名 编入 title；来源放 author
+    title, author = build_pdf_meta(SELFTEST_TOPICS[0], "测试星球", "报告A.pdf")
+    assert "本周研报合集" in title, f"主题未进标题：{title!r}"
+    assert "报告A" in title and "报告A.pdf" not in title, f"报告名处理错误：{title!r}"
+    assert author == "知识星球·测试星球", f"来源作者错误：{author!r}"
 
     print("全部断言通过 ✅（仅离线样例，未联网实测真实 zsxq API）")
     return 0

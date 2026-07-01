@@ -126,19 +126,63 @@ def enumerate_contracts():
 # ----------------------------------------------------------------------------
 # 2) 单合约拉取：日线 + 希腊字母，合并为一张表
 # ----------------------------------------------------------------------------
+GREEKS_MAPPING = {
+    "Delta": "greek_delta",
+    "Gamma": "greek_gamma",
+    "Theta": "greek_theta",
+    "Vega": "greek_vega",
+    "隐含波动率": "greek_iv",
+    "理论价值": "greek_theo",
+    "交易代码": "trade_code",
+    "期权合约简称": "contract_name",
+}
+
+
+def _add_meta(df, meta):
+    """给数据表补上元数据列（就地修改并返回）。"""
+    df["contract"] = meta["contract"]
+    df["underlying"] = meta["underlying"]
+    df["underlying_name"] = meta["underlying_name"]
+    df["expiry"] = meta["expiry"]
+    df["call_put"] = meta["call_put"]
+    return df
+
+
 def build_contract_frame(meta):
-    """返回 (DataFrame or None, status_dict)。"""
+    """返回 (DataFrame or None, status_dict)。
+
+    日线是主交付物；希腊字母是加成（快照，广播到每行）。
+    日线无数据/超时 -> 跳过该合约并如实记录（no-data / TIMEOUT），
+    但会顺带记录希腊字母是否仍可用，便于汇报。
+    """
     code = meta["contract"]
     status = {"greeks": "n/a"}
 
+    # ---- 日线（主交付物）----
     daily, err = run_with_timeout(lambda: ak.option_sse_daily_sina(symbol=code))
     if daily is None:
-        status["daily"] = err
+        # akshare 在日线为空时会抛 ValueError(Length mismatch...)，归为无数据；
+        # 其余（TIMEOUT / ProxyError 等）原样保留。
+        status["daily"] = "no-data" if "Length mismatch" in str(err) else err
+    elif daily.empty:
+        status["daily"] = "no-data"
+    else:
+        status["daily"] = "ok"
+
+    # ---- 希腊字母（快照，加成）----
+    greeks, gerr = run_with_timeout(lambda: ak.option_sse_greeks_sina(symbol=code))
+    g = None
+    if greeks is None:
+        status["greeks"] = f"unavailable ({gerr})"
+    elif greeks.empty or "字段" not in greeks.columns:
+        status["greeks"] = "unavailable (bad-shape)"
+    else:
+        status["greeks"] = "ok"
+        g = dict(zip(greeks["字段"], greeks["值"]))
+
+    # 日线无数据则跳过（如实记录，不用希腊字母伪造日线 K 线）
+    if status["daily"] != "ok":
         return None, status
-    if daily.empty:
-        status["daily"] = "empty"
-        return None, status
-    status["daily"] = "ok"
 
     df = daily.rename(
         columns={
@@ -151,40 +195,14 @@ def build_contract_frame(meta):
         }
     ).copy()
     df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-
-    # 元数据列
-    df["contract"] = meta["contract"]
-    df["underlying"] = meta["underlying"]
-    df["underlying_name"] = meta["underlying_name"]
-    df["expiry"] = meta["expiry"]
-    df["call_put"] = meta["call_put"]
+    _add_meta(df, meta)
     df["strike"] = pd.NA
 
-    # 希腊字母（快照，长表 字段/值 -> 广播到每行）
-    greeks, gerr = run_with_timeout(lambda: ak.option_sse_greeks_sina(symbol=code))
-    if greeks is None:
-        status["greeks"] = f"unavailable ({gerr})"
-    elif greeks.empty or "字段" not in greeks.columns:
-        status["greeks"] = "unavailable (bad-shape)"
-    else:
-        status["greeks"] = "ok"
-        g = dict(zip(greeks["字段"], greeks["值"]))
-        # 行权价
-        strike = g.get("行权价")
-        if strike is not None:
-            df["strike"] = strike
-        # 广播希腊字母/隐含波动率快照
-        mapping = {
-            "Delta": "greek_delta",
-            "Gamma": "greek_gamma",
-            "Theta": "greek_theta",
-            "Vega": "greek_vega",
-            "隐含波动率": "greek_iv",
-            "理论价值": "greek_theo",
-            "交易代码": "trade_code",
-            "期权合约简称": "contract_name",
-        }
-        for src, dst in mapping.items():
+    # 希腊字母快照广播到每行（若可用）
+    if g is not None:
+        if g.get("行权价") is not None:
+            df["strike"] = g.get("行权价")
+        for src, dst in GREEKS_MAPPING.items():
             df[dst] = g.get(src, pd.NA)
 
     return df, status
@@ -232,10 +250,10 @@ def main():
 
         if df is None:
             skipped_failed += 1
-            reason = status.get("daily", "unknown")
+            reason = f"daily={status.get('daily')},greeks={status.get('greeks')}"
             fail_reasons[reason] = fail_reasons.get(reason, 0) + 1
             print(
-                f"[{i}/{total}] {code} SKIP daily={status.get('daily')}",
+                f"[{i}/{total}] {code} SKIP {reason}",
                 flush=True,
             )
             continue

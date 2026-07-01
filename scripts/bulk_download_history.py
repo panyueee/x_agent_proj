@@ -198,8 +198,9 @@ def fetch_yf(symbol: str, start: str) -> pd.DataFrame | None:
 
 # ── 批量编排 ──────────────────────────────────────────────────────────────────
 
-def run_market(market: str, start: str, limit: int | None, sleep: float) -> None:
-    _log(f"=== 市场 {market} 开始（start={start}）===")
+def run_market(market: str, start: str, limit: int | None, sleep: float,
+               shard: tuple[int, int] | None = None) -> None:
+    _log(f"=== 市场 {market} 开始（start={start}{f' shard={shard[0]}/{shard[1]}' if shard else ''}）===")
     bs = None
     try:
         if market == "a":
@@ -219,10 +220,13 @@ def run_market(market: str, start: str, limit: int | None, sleep: float) -> None
             bs.logout()
         return
 
+    if shard:
+        i, n = shard
+        syms = syms[i::n]   # 跨步分片，均匀覆盖全表，便于多进程并行
     if limit:
         syms = syms[:limit]
     total = len(syms)
-    _log(f"市场 {market} 待处理：{total} 只")
+    _log(f"市场 {market} 待处理：{total} 只" + (f"（分片 {shard[0]}/{shard[1]}）" if shard else ""))
 
     ok = skip = empty = fail = 0
     try:
@@ -268,6 +272,7 @@ def main() -> None:
     ap.add_argument("--start", default=START_DEFAULT)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--sleep", type=float, default=0.3)
+    ap.add_argument("--shard", default=None, help="分片 i/N（如 0/6），多进程并行用")
     ap.add_argument("--status", action="store_true")
     args = ap.parse_args()
 
@@ -275,9 +280,14 @@ def main() -> None:
         show_status()
         return
 
+    shard = None
+    if args.shard:
+        i, n = args.shard.split("/")
+        shard = (int(i), int(n))
+
     markets = ["a", "hk", "us"] if args.market == "all" else [args.market]
     for m in markets:
-        run_market(m, args.start, args.limit, args.sleep)
+        run_market(m, args.start, args.limit, args.sleep, shard)
     _log("全部市场处理结束")
     show_status()
 

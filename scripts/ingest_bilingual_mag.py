@@ -96,8 +96,15 @@ def main():
     _log(f"待处理 {len(todo)} 期")
     TMP = ROOT / "data" / "_mag_tmp.pdf"
 
+    SIZE_CAP = 400 * 1024 * 1024   # >400MB 的巨型 PDF 常下载 dead-hang/解析OOM，直接跳过
     ok = fail = 0
     for i, p in enumerate(todo, 1):
+        if p.get("size", 0) > SIZE_CAP:
+            done.add(str(p["fs_id"])); save_done(state, done); fail += 1
+            with open(ROOT / "data" / f"mag_failed_{re.sub(r'[^a-zA-Z0-9]','_',args.pub)}.log", "a") as flog:
+                flog.write(f"{p['name']}\t{p['size']//1024//1024}MB\tSKIP_TOO_LARGE(>400MB)\n")
+            _log(f"[{i}/{len(todo)}] ⏭ {p['name'][:40]}: {p['size']//1024//1024}MB 超限跳过")
+            continue
         try:
             stream_download(p["fs_id"], TMP)
             fhash = hashlib.md5(open(TMP, "rb").read(1 << 20)).hexdigest()[:16]

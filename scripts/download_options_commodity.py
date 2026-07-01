@@ -38,7 +38,29 @@ ROOT = "/Users/pany19/Documents/x_agent_proj"
 OUT_DIR = os.path.join(ROOT, "data", "options_history", "chains", "commodity")
 LOG_PATH = os.path.join(ROOT, "data", "options_history", "commodity_download.log")
 REPORT_PATH = os.path.join(ROOT, "data", "options_history", "commodity_report.json")
+# 负缓存：记录确认无数据(NODATA)的合约码，重启后不再重复探测（这些深度虚值合约从未成交）
+NEG_PATH = os.path.join(ROOT, "data", "options_history", "commodity_nodata.txt")
+DONE_SENTINEL = os.path.join(ROOT, "data", "options_history", "commodity_ALLDONE")
 os.makedirs(OUT_DIR, exist_ok=True)
+
+_neg_lock = threading.Lock()
+
+
+def load_neg():
+    s = set()
+    if os.path.exists(NEG_PATH):
+        with open(NEG_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                code = line.strip()
+                if code:
+                    s.add(code)
+    return s
+
+
+def add_neg(code):
+    with _neg_lock:
+        with open(NEG_PATH, "a", encoding="utf-8") as f:
+            f.write(code + "\n")
 
 # ---------------------------------------------------------------------------
 # 请求的品种 -> akshare 实际接受的品种字符串（经 live 页面确认）
@@ -170,6 +192,9 @@ def main():
 
     report = {}
     grand_rows = 0
+    all_months_ok = True   # 是否所有品种本轮都成功取到 months；否则不写完成哨兵
+    neg = load_neg()
+    log(f"loaded negative-cache (known no-data): {len(neg)} contracts")
 
     for product in PRODUCTS:
         pstat = {
@@ -192,6 +217,7 @@ def main():
         pstat["months"] = months
         if mstatus != "OK":
             log(f"  months FAILED status={mstatus}; skip product")
+            all_months_ok = False   # 本轮不算完整，触发外层重启循环再跑一遍
             report[product] = pstat
             continue
         log(f"  months({len(months)}): {months}")
@@ -209,6 +235,10 @@ def main():
                 if os.path.exists(path) and os.path.getsize(path) > 0:
                     pstat["skipped_existing"] += 1
                     continue
+                # 负缓存：已知无数据合约，重启后不再探测
+                if code in neg:
+                    pstat["nodata"] += 1
+                    continue
 
                 pstat["attempted"] += 1
                 hstatus, df = get_hist(code)
@@ -216,6 +246,8 @@ def main():
 
                 if hstatus == "NODATA":
                     pstat["nodata"] += 1
+                    neg.add(code)
+                    add_neg(code)
                     continue
                 if hstatus == "TIMEOUT":
                     pstat["timeout"] += 1
@@ -254,6 +286,16 @@ def main():
     with open(REPORT_PATH, "w", encoding="utf-8") as f:
         json.dump({"products": report, "unavailable": UNAVAILABLE,
                    "grand_rows": grand_rows}, f, ensure_ascii=False, indent=2)
+    # 完成哨兵：仅当本轮所有品种 months 均成功、且无合约仍处 error/timeout 待补时才写，
+    # 否则外层循环再跑一轮补齐（代理抖动导致的临时失败）。
+    pending = any(p.get("error", 0) or p.get("timeout", 0) for p in report.values())
+    if all_months_ok and not pending:
+        with open(DONE_SENTINEL, "w") as f:
+            f.write("done\n")
+        log("completion sentinel written")
+    else:
+        log(f"NOT complete (all_months_ok={all_months_ok} pending_err_timeout={pending}); "
+            f"loop will re-run")
 
 
 if __name__ == "__main__":

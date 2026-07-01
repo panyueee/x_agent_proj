@@ -25,3 +25,7 @@ digest.md
 # PDF 书籍（本地文件，不入库）
 books/*.pdf
 data/
+
+# 大二进制：静态ffmpeg + 本地whisper模型(不进git)
+bin/
+models/

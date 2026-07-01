@@ -425,6 +425,7 @@ def main() -> int:
     ap.add_argument("--status", action="store_true", help="查看已入库进度")
     ap.add_argument("--dry-run", action="store_true", help="只列出会下载哪些 file，不真下不入库")
     ap.add_argument("--selftest", action="store_true", help="离线样例自测（绝不联网）")
+    ap.add_argument("--group-name", help="显式指定星球名（覆盖联网解析，省一次API且稳定）")
     ap.add_argument("--token", help="zsxq token（否则读 env ZSXQ_TOKEN）")
     ap.add_argument("--auth-mode", choices=["cookie", "header"],
                     default=os.environ.get("ZSXQ_AUTH_MODE", "cookie"),
@@ -448,7 +449,11 @@ def main() -> int:
         return 2
 
     sess = make_session(token, args.auth_mode)
-    name_map = resolve_group_names(sess, gids) if not args.dry_run else {}
+    # 显式 --group-name 覆盖（单星球场景）→ 跳过联网解析，省一次 API 且稳定
+    if args.group_name and len(gids) == 1:
+        name_map = {gids[0]: args.group_name}
+    else:
+        name_map = resolve_group_names(sess, gids) if not args.dry_run else {}
 
     done = load_done()
     grand = {"topics": 0, "pdf_found": 0, "skipped_nonpdf": 0,

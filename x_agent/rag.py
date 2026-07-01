@@ -111,6 +111,25 @@ def _doc_id(source_id: str, chunk_idx: int) -> str:
     return f"{h}_{chunk_idx}"
 
 
+def text_quality(text: str, min_chars: int = 40) -> tuple[bool, str]:
+    """OCR/ASR 文本入库前有效性质检。返回 (是否有效, 原因)。
+    拦截：过短(近空/纯乱码碎片)、字符多样性过低、连续重复子串(whisper 幻觉)。
+    """
+    if not text:
+        return False, "empty"
+    real = [c for c in text if ("一" <= c <= "鿿") or c.isalnum()]
+    if len(real) < min_chars:
+        return False, "too_short"
+    # 字符多样性过低 → "啊啊啊"/"的的的" 之类
+    if len(set(real)) / len(real) < 0.12:
+        return False, "low_diversity"
+    # 连续重复子串（whisper 对静音/音乐常见幻觉；OCR 偶发）
+    collapsed = re.sub(r"(.{4,40}?)\1{3,}", r"\1", text)
+    if len(collapsed) < len(text) * 0.5:
+        return False, "repetitive"
+    return True, "ok"
+
+
 # ── 入库接口 ─────────────────────────────────────────────────────────────────
 
 def ingest_text(

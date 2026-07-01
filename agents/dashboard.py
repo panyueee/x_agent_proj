@@ -19,7 +19,7 @@ from typing import List, Optional
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, BackgroundTasks
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
 from pydantic import BaseModel
 import uvicorn
 
@@ -849,30 +849,64 @@ class RagAskPayload(BaseModel):
     source_type: Optional[str] = None
 
 
+# 图表意图关键词：命中则在回答旁附一张 K 线图（标的从问题里确定性解析）
+_CHART_KW = re.compile(r"(K线|k线|Ｋ线|蜡烛图?|走势|行情图|图表|画.*图|来?张图|看.*图|kline|candlestick)")
+
+
 @app.post("/api/rag/ask")
 def rag_ask(payload: RagAskPayload):
     """对书籍知识库提问：检索 + Claude 生成回答。
 
     同步端点，Starlette 会自动在线程池中执行，不会阻塞事件循环。
     优雅降级：未配置 key / 知识库为空 / 生成失败时均返回 200 + 清晰 JSON。
+    若问题含"K线/走势/图"等意图且能解析出标的，额外返回 chart 字段（前端调 /api/chart 出图）。
     """
     question = (payload.question or "").strip()
     if not question:
         return {"answer": "请输入问题。", "sources": []}
 
+    # 图表意图：解析标的（不在此渲染，前端 <img src=/api/chart> 触发渲染并缓存）
+    chart = None
+    if _CHART_KW.search(question):
+        try:
+            from x_agent.instrument_chart import resolve
+            first, alts = resolve(question)
+            if first:
+                echo = f"已匹配：{first.label()}"
+                if alts:
+                    echo += "；另有 " + "、".join(a.label() for a in alts)
+                chart = {"echo": echo,
+                         "url": f"/api/chart?q={urllib.parse.quote(question)}"}
+        except Exception:
+            chart = None
+
     try:
         client = _get_anthropic_client()
         if client is None:
-            return {"answer": "未配置 ANTHROPIC_API_KEY，无法生成回答", "sources": []}
+            return {"answer": "未配置 ANTHROPIC_API_KEY，无法生成回答", "sources": [], "chart": chart}
         from x_agent.rag import ask as _rag_ask
         kwargs = {"source_type": payload.source_type}
         if payload.top_k and payload.top_k > 0:
             kwargs["top_k"] = payload.top_k
         result = _rag_ask(question, client, **kwargs)
         return {"answer": result.get("answer", ""),
-                "sources": result.get("sources", [])}
+                "sources": result.get("sources", []), "chart": chart}
     except Exception as e:
-        return {"answer": f"回答生成失败：{e}", "sources": []}
+        return {"answer": f"回答生成失败：{e}", "sources": [], "chart": chart}
+
+
+@app.get("/api/chart")
+def api_chart(q: str, months: int = 6):
+    """按标的自然语言出 K 线图 PNG（缓存于 output/charts）。解析失败返回 404 JSON。"""
+    from x_agent.instrument_chart import render_chart
+    try:
+        r = render_chart(q, months=months)
+    except Exception as e:
+        raise HTTPException(500, f"出图失败：{e}")
+    if not r.get("ok"):
+        raise HTTPException(404, r.get("echo", "未找到标的"))
+    return FileResponse(r["png"], media_type="image/png",
+                        headers={"X-Chart-Echo": urllib.parse.quote(r["echo"])})
 
 
 @app.get("/api/baidu/status")
@@ -1411,6 +1445,7 @@ textarea:focus { border-color:#3b82f6; }
       <button class="btn-sm primary" id="btn-ask" onclick="askKb()">提问</button>
     </div>
     <div class="ask-answer" id="ask-answer" style="display:none"></div>
+    <div id="ask-chart" style="display:none;margin-top:10px"></div>
     <div class="rag-type-row" id="ask-sources"></div>
   </div>
 </div>
@@ -1933,6 +1968,17 @@ async function askKb() {
     });
     const d = await r.json();
     ansEl.textContent = d.answer || '（无回答）';
+    // K线图：命中标的时展示 echo 说明 + 图片（图片按需渲染并缓存）
+    const chartEl = document.getElementById('ask-chart');
+    if (d.chart && d.chart.url) {
+      chartEl.style.display = 'block';
+      chartEl.innerHTML = '<div style="font-size:13px;color:#8b95a5;margin-bottom:6px">📈 ' +
+        (d.chart.echo || '') + '</div>' +
+        '<img src="' + d.chart.url + '" style="max-width:100%;border-radius:8px" ' +
+        'onerror="this.parentNode.innerHTML=\'<span style=color:#c66>图表渲染失败</span>\'">';
+    } else {
+      chartEl.style.display = 'none'; chartEl.innerHTML = '';
+    }
     const sources = d.sources || [];
     srcEl.innerHTML = sources.map(s => {
       let label = s.title || '未知来源';

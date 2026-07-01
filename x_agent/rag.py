@@ -42,7 +42,10 @@ VOYAGE_BATCH   = 128    # Voyage API 单批最大条数
 
 def _get_conn() -> sqlite3.Connection:
     Path(RAG_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(RAG_DB_PATH)
+    conn = sqlite3.connect(RAG_DB_PATH, timeout=30)
+    # 并发写安全：WAL 允许多读单写，busy_timeout 让写者等待而非立即报 "database is locked"
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS chunks (
             id          TEXT PRIMARY KEY,

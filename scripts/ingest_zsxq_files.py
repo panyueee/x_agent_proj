@@ -557,6 +557,14 @@ def main() -> int:
                 stopped = True
                 print(f"\n🛑 {e}", file=sys.stderr)
                 break
+            except RuntimeError as e:
+                # iter_topics(列举帖子)的 1059 也走同一停整轮逻辑（DrainStop 只兜了下载地址那步）
+                if "1059" in str(e):
+                    stopped = True
+                    print(f"\n🛑 列举帖子命中 code=1059（账号频率/滥用信号），停止本轮，"
+                          f"明晚续。{e}", file=sys.stderr)
+                    break
+                raise
             for k in grand:
                 grand[k] += stat.get(k, 0)
             print(f"  统计: {stat}")

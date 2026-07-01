@@ -48,15 +48,25 @@ def collect_pdfs(root):
     return pdfs
 
 
-def stream_download(fs_id, dest):
-    m = _S.get("https://pan.baidu.com/rest/2.0/xpan/multimedia", params={
-        "method": "filemetas", "access_token": _at(), "fsids": json.dumps([fs_id]),
-        "dlink": "1"}, headers=UA, timeout=30).json()
-    dlink = m["list"][0]["dlink"] + f"&access_token={_at()}"
-    with _S.get(dlink, headers=UA, timeout=1200, stream=True) as r:
-        with open(dest, "wb") as f:
-            for ch in r.iter_content(1 << 20):
-                f.write(ch)
+def stream_download(fs_id, dest, tries=3):
+    last = None
+    for attempt in range(tries):
+        try:
+            m = _S.get("https://pan.baidu.com/rest/2.0/xpan/multimedia", params={
+                "method": "filemetas", "access_token": _at(), "fsids": json.dumps([fs_id]),
+                "dlink": "1"}, headers=UA, timeout=30).json()
+            dlink = m["list"][0]["dlink"] + f"&access_token={_at()}"
+            size = 0
+            with _S.get(dlink, headers=UA, timeout=1800, stream=True) as r:
+                with open(dest, "wb") as f:
+                    for ch in r.iter_content(1 << 20):
+                        f.write(ch); size += len(ch)
+            if size > 0:
+                return
+        except Exception as e:
+            last = e
+            time.sleep(2 * (2 ** attempt))
+    raise last if last else RuntimeError("下载为空")
 
 
 def load_done(state):
@@ -117,7 +127,11 @@ def main():
             _log(f"[{i}/{len(todo)}] ✅ {issue}: {len(pages)}页 {n_chunks}块 封面标记页{len(cover_pages)} ({p['size']//1024//1024}MB)")
         except Exception as e:
             fail += 1
-            _log(f"[{i}/{len(todo)}] ❌ {p['name'][:40]}: {str(e)[:80]}")
+            # 标 done 避免每次重启无限重试永久失败的期（超大文件/损坏PDF）；记入失败清单供人工处理
+            done.add(str(p["fs_id"])); save_done(state, done)
+            with open(ROOT / "data" / f"mag_failed_{re.sub(r'[^a-zA-Z0-9]','_',args.pub)}.log", "a") as flog:
+                flog.write(f"{p['name']}\t{p['size']//1024//1024}MB\t{str(e)[:100]}\n")
+            _log(f"[{i}/{len(todo)}] ❌ {p['name'][:40]}: {str(e)[:80]}（已标记跳过）")
         finally:
             TMP.unlink(missing_ok=True)
         time.sleep(0.2)

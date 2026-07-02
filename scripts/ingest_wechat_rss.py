@@ -310,7 +310,9 @@ def _fetch(url: str) -> str:
     import requests
     s = requests.Session()
     s.trust_env = False  # 忽略环境里的 http(s)_proxy
-    r = s.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0 wewe-rss-ingest"})
+    # 注意：wewe-rss 生成 limit=500 的全文 feed 可能要 1-2 分钟（体积可达数百MB），
+    # 超时太短会导致客户端提前放弃、服务端并发构建多个大 feed 而 OOM 崩溃。
+    r = s.get(url, timeout=300, headers={"User-Agent": "Mozilla/5.0 wewe-rss-ingest"})
     r.raise_for_status()
     r.encoding = r.apparent_encoding or "utf-8"
     return r.text

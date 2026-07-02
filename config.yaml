@@ -51,6 +51,7 @@ account_groups:
   - lookonchain         # 链上巨鲸追踪(英文)
   - EmberCN             # 链上追踪(中文)
   - WuBlockchain        # 吴说区块链
+  - RayDalio            # 无干净文章档案源，X 是其观点主渠道
   serenity_following:
   - aleabitoreddit
   - chrisbarber
@@ -444,6 +445,17 @@ dune:
   min_usd_smart_money: 500000   # 聪明钱过滤门槛（美元）
   min_usd_whale: 1000000        # 鲸鱼转账过滤门槛（美元）
 
+wencai:
+  enabled: false          # 同花顺问财自然语言选股（pywencai，需要 node ≥ v16）
+  max_per_query: 20       # 每条查询最多入库多少只股票
+  sleep_sec: 3            # 查询间隔（秒），避免触发同花顺风控
+  queries:
+    # 支持纯字符串或 {query, label} 两种写法；单次查询约 10~30 秒
+    - query: 市盈率<20 且连续三年净利润增长的股票
+      label: value_growth
+    - query: 今日涨停的AI算力概念股
+      label: ai_limit_up
+
 weread:
   enabled: false          # 设为 true 并设置 WEREAD_COOKIE 后生效
   cookie: ${WEREAD_COOKIE}      # 浏览器 Cookie（登录 weread.qq.com 后复制）
@@ -479,6 +491,17 @@ psych:
   use_llm: false          # true 时调 Claude 生成心理解读报告（需 ANTHROPIC_API_KEY）
   fear_threshold: 70      # Panic Index >= 此值时触发逆向买入预警
   greed_threshold: 30     # Panic Index <= 此值时触发逆向减仓预警
+
+tradingview:
+  enabled: false            # TradingView K线补源（tvDatafeed 匿名模式，yfinance 备用源）
+  symbols:                  # "交易所:代码" 写法，见 x_agent/tv_fetcher.py
+    - "SSE:600519"
+    - "NASDAQ:AAPL"
+    - "BINANCE:BTCUSDT"
+  interval: "1D"            # 1m/5m/15m/1h/4h/1D/1W/1M
+  n_bars: 500               # 单次根数，上限约 5000
+  webhook_port: 8787        # 告警接收器端口（scripts/tv_webhook_server.py，默认不自启）
+  # 接收器需 TV_WEBHOOK_SECRET 环境变量 + TradingView 付费版 webhook 通知
 
 feishu:
   app_id: cli_aacb563771795cef

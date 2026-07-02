@@ -42,6 +42,7 @@ from x_agent.industry_fetcher import IndustryClient, IndustryNode
 from x_agent.research_fetcher import ResearchClient
 from x_agent.pipeline import run_pipeline, run_industry_step, run_research_step
 from x_agent.qcc_fetcher import build_qcc_client, QccClientError, ListedCompanyClient
+from x_agent.wencai_fetcher import run_queries as run_wencai_queries
 from x_agent.dune_fetcher import build_dune_client
 from x_agent.psych_analyzer import PsychAnalyzer
 from x_agent.portfolio_optimizer import run_optimizer
@@ -440,6 +441,10 @@ def run_once(cfg, client, store, source, llm=None):
         run_qcc(cfg, store)
         return
 
+    if source == "wencai":
+        run_wencai(cfg, store)
+        return
+
     if source == "psych":
         run_psych(cfg, store, llm)
         return
@@ -538,6 +543,10 @@ def run_once(cfg, client, store, source, llm=None):
     # 链上聪明钱（dune / all 模式）
     if source in ("dune", "all"):
         run_dune(cfg, store)
+
+    # 问财自然语言选股（all 模式；enabled: false 时内部直接跳过）
+    if source == "all":
+        run_wencai(cfg, store)
 
     # 市场恐慌分析（psych / all 模式）
     if source in ("psych", "all"):
@@ -777,6 +786,25 @@ def run_dune(cfg, store):
     print(f"[dune] 链上数据：共 {len(tweets)} 条，新入库 {saved} 条")
 
 
+def run_wencai(cfg, store):
+    """执行问财自然语言选股并入库（去重：同日同查询同股票只存一次）。"""
+    try:
+        picks = run_wencai_queries(cfg)
+    except Exception as e:
+        print(f"[wencai] 运行失败: {e}")
+        return
+    if not picks:
+        return
+    saved = 0
+    for rec in picks:
+        try:
+            if store.save_wencai_pick(rec):
+                saved += 1
+        except Exception as e:
+            print(f"[wencai] 入库失败 {rec.get('code', '')}: {e}")
+    print(f"[wencai] 选股结果共 {len(picks)} 条，新入库 {saved} 条")
+
+
 def run_psych(cfg, store, llm=None):
     """计算市场恐慌/贪婪指数并入库，可选 LLM 心理解读。"""
     psych_cfg = cfg.get("psych", {})
@@ -909,7 +937,8 @@ def parse_args():
     parser.add_argument(
         "--source",
         choices=["x", "xhs", "tgb", "finance", "industry", "research", "pipeline",
-                 "qcc", "dune", "psych", "portfolio", "risk", "factor", "rag", "weread", "all"],
+                 "qcc", "dune", "psych", "portfolio", "risk", "factor", "rag", "weread",
+                 "wencai", "all"],
         default="all",
         help="数据来源（默认 all）",
     )

@@ -219,6 +219,23 @@ CREATE TABLE IF NOT EXISTS fundamentals(
 CREATE INDEX IF NOT EXISTS idx_fund_symbol ON fundamentals(symbol);
 CREATE INDEX IF NOT EXISTS idx_fund_date   ON fundamentals(date);
 
+CREATE TABLE IF NOT EXISTS wencai_picks(
+  id          TEXT PRIMARY KEY,   -- hash(date|query|code)：同日同查询同股票只存一次
+  date        TEXT,               -- 选股日期 YYYY-MM-DD
+  query       TEXT,               -- 问财自然语言查询原文
+  label       TEXT DEFAULT '',    -- config 里给查询起的标签
+  code        TEXT,               -- 股票代码（不带交易所后缀，如 600519）
+  full_code   TEXT DEFAULT '',    -- 带后缀代码（600519.SH）
+  name        TEXT,               -- 股票简称
+  price       REAL,               -- 最新价
+  change_pct  REAL,               -- 最新涨跌幅（%）
+  metrics     TEXT DEFAULT '{}',  -- 其余指标列 JSON（列名已去日期后缀）
+  fetched_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_wencai_date  ON wencai_picks(date);
+CREATE INDEX IF NOT EXISTS idx_wencai_code  ON wencai_picks(code);
+CREATE INDEX IF NOT EXISTS idx_wencai_query ON wencai_picks(query);
+
 CREATE TABLE IF NOT EXISTS company_persons(
   id            TEXT PRIMARY KEY,   -- hash(credit_code + name + role)
   credit_code   TEXT,               -- 所属企业
@@ -869,6 +886,47 @@ class Store:
         ]
         self.conn.executemany(sql, params)
         self.conn.commit()
+
+    # ── 问财选股 ──
+
+    def save_wencai_pick(self, rec: dict) -> bool:
+        """保存一条问财选股记录，以 date|query|code 的 hash 去重。
+        返回 True 表示新写入，False 表示当日同查询同股票已存在。
+        """
+        import hashlib
+        key = f"{rec.get('date', '')}|{rec.get('query', '')}|{rec.get('code', '')}"
+        rid = hashlib.md5(key.encode()).hexdigest()
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO wencai_picks "
+            "(id, date, query, label, code, full_code, name, price, change_pct, metrics, fetched_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                rid,
+                rec.get("date", ""),
+                rec.get("query", ""),
+                rec.get("label", ""),
+                rec.get("code", ""),
+                rec.get("full_code", ""),
+                rec.get("name", ""),
+                rec.get("price"),
+                rec.get("change_pct"),
+                json.dumps(rec.get("metrics") or {}, ensure_ascii=False),
+                rec.get("fetched_at", dt.datetime.utcnow().isoformat()),
+            ),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def recent_wencai_picks(self, limit: int = 200) -> list:
+        """返回最近的问财选股记录，按日期倒序。
+
+        返回元素：(date, query, label, code, name, price, change_pct)
+        """
+        return self.conn.execute(
+            "SELECT date, query, label, code, name, price, change_pct "
+            "FROM wencai_picks ORDER BY date DESC, query, code LIMIT ?",
+            (limit,),
+        ).fetchall()
 
     def recent_supplier_updates(self, customer_name: str, limit: int = 20) -> list:
         """返回某核心公司的供应商动态。"""

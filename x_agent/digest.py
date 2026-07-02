@@ -262,6 +262,42 @@ def _rag_section() -> list:
     return lines
 
 
+def _wencai_section(store, limit: int = 200) -> list:
+    """生成问财自然语言选股板块：只展示最新一天的结果，按查询语句分组。"""
+    try:
+        rows = store.recent_wencai_picks(limit=limit)
+    except Exception:
+        return []
+    if not rows:
+        return []
+
+    # rows 已按 date 倒序，只取最新一天
+    latest_date = rows[0][0]
+    rows = [r for r in rows if r[0] == latest_date]
+
+    # 按查询语句分组（保持出现顺序）
+    grouped: dict[str, list] = {}
+    for r in rows:
+        grouped.setdefault(r[1], []).append(r)
+
+    lines = ["## 🔍 问财选股", ""]
+    lines.append(f"日期：**{latest_date}**  （同花顺问财自然语言查询）")
+    lines.append("")
+    for query, picks in grouped.items():
+        label = picks[0][2]
+        title = f"### {query}" + (f"  `{label}`" if label else "")
+        lines.append(f"{title}  — {len(picks)} 只")
+        lines.append("")
+        lines.append("| 代码 | 名称 | 最新价 | 涨跌幅 |")
+        lines.append("| ---- | ---- | ------: | ------: |")
+        for _date, _q, _label, code, name, price, change_pct in picks:
+            price_str = f"{price:.4g}" if price is not None else "—"
+            pct_str = _format_pct(change_pct) if change_pct is not None else "—"
+            lines.append(f"| `{code}` | {name} | {price_str} | {pct_str} |")
+        lines.append("")
+    return lines
+
+
 def _factor_section(store) -> list:
     """因子收益率摘要：最近 20 天各因子表现。"""
     try:
@@ -370,6 +406,9 @@ def build_digest(store, path: str, annotate_books: bool | None = None) -> str:
 
     # ── 淘股吧大V动态板块 ──
     lines += _tgb_section(store)
+
+    # ── 问财选股板块 ──
+    lines += _wencai_section(store)
 
     # ── 因子收益率板块 ──
     lines += _factor_section(store)

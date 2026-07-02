@@ -129,8 +129,12 @@ def text_quality(text: str, min_chars: int = 40) -> tuple[bool, str]:
     real = [c for c in text if ("一" <= c <= "鿿") or c.isalnum()]
     if len(real) < min_chars:
         return False, "too_short"
-    # 字符多样性过低 → "啊啊啊"/"的的的" 之类
-    if len(set(real)) / len(real) < 0.12:
+    # 字符多样性过低 → "啊啊啊"/"的的的" 刷屏。
+    # 注意：中文长文用词集中，多样性比天然偏低（万字宏观报告仅 ~900 唯一字，比值 ~0.08），
+    # 故比值阈值只对短文本(<500 真字符)用；长文本改看"绝对唯一字过少"以免误杀真文章，
+    # 长文的连续重复垃圾由下面的 repetitive 检查兜住。
+    uniq = len(set(real))
+    if uniq < 20 or (len(real) < 500 and uniq / len(real) < 0.12):
         return False, "low_diversity"
     # 连续重复子串（whisper 对静音/音乐常见幻觉；OCR 偶发）
     collapsed = re.sub(r"(.{4,40}?)\1{3,}", r"\1", text)

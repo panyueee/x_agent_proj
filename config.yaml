@@ -36,6 +36,21 @@ storage:
 digest:
   output_path: ./output/digest.md
 account_groups:
+  # 2026-07-02 精选补缺：宏观信源 + 链上追踪 + 加密研究（serenity列表缺的类型）
+  curated_macro_crypto:
+  - NickTimiraos        # WSJ 美联储传声筒
+  - FedGuy12            # Joseph Wang 前纽联储，流动性
+  - LynAldenContact     # 宏观×比特币
+  - KobeissiLetter      # 市场异动快讯
+  - elerianm            # El-Erian 宏观
+  - Schuldensuehner     # 全球市场图表流
+  - CryptoHayes         # Arthur Hayes 宏观×加密
+  - cobie               # OG 交易员
+  - hasufl              # 加密研究员
+  - VitalikButerin
+  - lookonchain         # 链上巨鲸追踪(英文)
+  - EmberCN             # 链上追踪(中文)
+  - WuBlockchain        # 吴说区块链
   serenity_following:
   - aleabitoreddit
   - chrisbarber

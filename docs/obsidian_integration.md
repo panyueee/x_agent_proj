@@ -2,9 +2,10 @@
 
 ## 连接对象
 - **Vault**：`/Users/pany19/Documents/Obsidian Vault`（本机唯一 vault，obsidian.json 里 open=true）
-- **落点文件夹**：`投研Research/`
-  - `投研主索引.MOC.md` —— promote 的挂载点（Map of Content）
-  - `_连接说明.md` —— vault 内的说明
+- **落点文件夹**：`投研Research/`，按板块分子文件夹：
+  - 根：`投研主索引.MOC.md`（promote 挂载点/Map of Content）、`_连接说明.md`
+  - `人物模型/`（如 张瑜 华创宏观）· `方法与框架/`（Persona方法、Aladdin风险方法论）· `系统与数据/`（数据库表设计、淘股吧抓取逻辑、政策事件库设计）· `行业与产业链/` · `公司Watchlist/` · `信号与假设/`
+  - 双链按文件名全库解析，跨文件夹不影响跳转；promote 新笔记时放对应板块子文件夹并挂 MOC
 - **obsidian CLI**：本机**未安装**。vault 就是普通 markdown 文件夹，promote 直接写文件即可；
   校验回链/标签/搜索用文件读取 + grep 兜底（符合 skill 的 Public Fallback Rule）。
 

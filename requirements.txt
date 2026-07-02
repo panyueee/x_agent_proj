@@ -44,6 +44,8 @@ pyportfolioopt==1.6.0
 scikit-learn==1.9.0
 toraniko==1.1.1
 akshare==1.18.64
+tradingview-datafeed>=2.1   # TradingView K线补源（import 名 tvDatafeed，rongardF fork）
+pywencai>=0.13.1            # 同花顺问财自然语言选股（PyExecJS 需要 node ≥ v16）
 rank_bm25>=0.2.2
 jieba>=0.42.1
 lancedb>=0.22.0

@@ -347,6 +347,35 @@ def _factor_section(store) -> list:
     return lines
 
 
+def _risk_section(store) -> list:
+    """组合风险快照摘要：读 risk_snapshots 最新一条（表不存在/为空返回 []）。"""
+    try:
+        snap = store.latest_risk_snapshot()
+    except Exception:
+        return []
+    if not snap:
+        return []
+
+    lines = [f"## 🛡 组合风险 — {snap['portfolio_id']} @ {snap['date']}", ""]
+    te = f"{snap['te_ann']*100:.2f}%" if snap.get("te_ann") else "—"
+    lines.append(
+        f"- 年化波动 **{snap['vol_ann']*100:.2f}%** | 1日99%VaR {snap['var99_1d']*100:.2f}% "
+        f"| TE {te} | 因子/特质 {snap['factor_vol']*100:.2f}%/{snap['specific_vol']*100:.2f}%"
+    )
+    contrib = snap.get("risk_contrib") or {}
+    if contrib:
+        top = sorted(contrib.items(), key=lambda kv: abs(kv[1]), reverse=True)[:5]
+        parts = [f"{k}={v*100:+.1f}%" for k, v in top]
+        lines.append("- 风险贡献 Top 因子：" + " | ".join(parts))
+    stocks = snap.get("stock_contrib") or []
+    if stocks:
+        parts = [f"{s.get('name') or s['symbol']}={s['pct']*100:.1f}%" for s in stocks[:5]]
+        lines.append("- 个股贡献 Top：" + " | ".join(parts))
+    lines.append("- 详情见 `output/risk_report.md`")
+    lines.append("")
+    return lines
+
+
 def build_digest(store, path: str, annotate_books: bool | None = None) -> str:
     # annotate_books=None 时沿用模块级开关 BOOK_ANNOTATION_ENABLED；
     # 显式传 True/False 可临时覆盖，便于按调用方需求开关书籍注解。
@@ -412,6 +441,9 @@ def build_digest(store, path: str, annotate_books: bool | None = None) -> str:
 
     # ── 因子收益率板块 ──
     lines += _factor_section(store)
+
+    # ── 组合风险板块（因子行情 → 组合风险 → 调仓建议的逻辑顺序）──
+    lines += _risk_section(store)
 
     # ── 组合权重板块 ──
     lines += _portfolio_section(store)

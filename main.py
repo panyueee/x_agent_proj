@@ -12,6 +12,7 @@
     --source pipeline X + 产业链 + 研报 三步联动（先抓 X，再自动触发后续）
     --source all      六路并行（默认）
     --source factor   因子模型（toraniko）
+    --source riskreport 组合风险因子分解日报（x_agent/risk，读 positions 表）
     --source rag      将 DB 中文章/研报/信号批量入库 RAG 向量库
     --source weread   抓取微信读书书单并入库 RAG（需 weread.enabled: true）
 
@@ -466,6 +467,17 @@ def run_once(cfg, client, store, source, llm=None):
                 for sym, m in report.items():
                     print(f"  {sym}: vol={m['vol_ann']:.1%} max_dd={m['max_dd']:.1%} "
                           f"ret={m['total_ret']:.1%} ({m['n_days']}日)")
+        return
+
+    if source == "riskreport":
+        # 组合风险因子分解日报（个人版 Aladdin 批次一）；digest 由 main() 统一刷新
+        from x_agent.risk.report import render_risk_report
+        portfolio_id = (cfg.get("riskreport") or {}).get("portfolio", "demo")
+        try:
+            path = render_risk_report(store, portfolio_id=portfolio_id)
+            print(f"[riskreport] 风险日报已生成: {path}")
+        except (ValueError, FileNotFoundError) as e:
+            print(f"[riskreport] 跳过: {e}")
         return
 
     if source == "factor":
@@ -937,8 +949,8 @@ def parse_args():
     parser.add_argument(
         "--source",
         choices=["x", "xhs", "tgb", "finance", "industry", "research", "pipeline",
-                 "qcc", "dune", "psych", "portfolio", "risk", "factor", "rag", "weread",
-                 "wencai", "all"],
+                 "qcc", "dune", "psych", "portfolio", "risk", "riskreport", "factor",
+                 "rag", "weread", "wencai", "all"],
         default="all",
         help="数据来源（默认 all）",
     )

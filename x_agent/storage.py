@@ -250,6 +250,48 @@ CREATE TABLE IF NOT EXISTS company_persons(
 CREATE INDEX IF NOT EXISTS idx_persons_company ON company_persons(credit_code);
 CREATE INDEX IF NOT EXISTS idx_persons_name    ON company_persons(name);
 CREATE INDEX IF NOT EXISTS idx_persons_role    ON company_persons(role);
+
+-- ── 证券主表 / 组合 / 持仓 / 风险快照（个人版 Aladdin 批次一，见 docs/aladdin/05）──
+
+CREATE TABLE IF NOT EXISTS securities(
+  symbol       TEXT PRIMARY KEY,   -- 统一主键，与 parquet 文件名对齐：sh.600519 / NVDA / BTC-USD
+  market       TEXT,               -- a / us / hk / crypto / etf / index / cb / fx / futures / bond
+  name         TEXT DEFAULT '',
+  sector_gics  TEXT DEFAULT '',    -- 迁移自 sw_sector_cache
+  aliases      TEXT DEFAULT '[]',  -- JSON: ["600519", "$MOUTAI", "贵州茅台"] 供信号 ticker 解析
+  has_parquet  INTEGER DEFAULT 0,
+  updated_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sec_market ON securities(market);
+
+CREATE TABLE IF NOT EXISTS portfolios(
+  portfolio_id TEXT PRIMARY KEY,   -- 'real' / 'demo' / 'paper_signals' / 'paper_optimizer'
+  name         TEXT, base_ccy TEXT DEFAULT 'CNY', created_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS positions(
+  portfolio_id TEXT, date TEXT, symbol TEXT,
+  quantity REAL, cost_price REAL, weight REAL,
+  source TEXT DEFAULT 'manual',    -- manual / signal / optimizer
+  note   TEXT DEFAULT '',
+  PRIMARY KEY(portfolio_id, date, symbol)
+);
+CREATE INDEX IF NOT EXISTS idx_pos_latest ON positions(portfolio_id, date);
+
+CREATE TABLE IF NOT EXISTS risk_snapshots(
+  portfolio_id  TEXT,
+  date          TEXT,               -- 快照日 YYYY-MM-DD
+  vol_ann       REAL,
+  var99_1d      REAL,
+  te_ann        REAL,
+  factor_vol    REAL, specific_vol REAL,
+  exposures     TEXT,               -- JSON {factor: beta}
+  risk_contrib  TEXT,               -- JSON {factor: ccr_pct}
+  stock_contrib TEXT,               -- JSON [{symbol, name, pct}] top10
+  method        TEXT DEFAULT 'ewma_factor_v1',
+  computed_at   TEXT,
+  PRIMARY KEY(portfolio_id, date)
+);
 """
 
 
@@ -936,3 +978,153 @@ class Store:
             "ORDER BY published_at DESC LIMIT ?",
             (customer_name, limit),
         ).fetchall()
+
+    # ── 证券主表 / 组合 / 持仓（个人版 Aladdin 批次一）──
+
+    def upsert_securities(self, records: list) -> int:
+        """批量写入证券主表（INSERT OR REPLACE），返回写入行数。
+
+        records 元素为 dict：symbol/market 必填，name/sector_gics/aliases/has_parquet 可选。
+        """
+        now = dt.datetime.utcnow().isoformat()
+        rows = [
+            (
+                r["symbol"], r["market"],
+                r.get("name", ""), r.get("sector_gics", ""),
+                json.dumps(r.get("aliases", []), ensure_ascii=False),
+                int(r.get("has_parquet", 0)), now,
+            )
+            for r in records
+        ]
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO securities "
+            "(symbol, market, name, sector_gics, aliases, has_parquet, updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            rows,
+        )
+        self.conn.commit()
+        return len(rows)
+
+    def get_security(self, symbol: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT symbol, market, name, sector_gics, aliases, has_parquet "
+            "FROM securities WHERE symbol=?", (symbol,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "symbol": row[0], "market": row[1], "name": row[2],
+            "sector_gics": row[3], "aliases": json.loads(row[4] or "[]"),
+            "has_parquet": row[5],
+        }
+
+    def upsert_portfolio(self, portfolio_id: str, name: str = "",
+                         base_ccy: str = "CNY") -> None:
+        """新建组合；已存在时保持 created_at 不变，仅更新名称/币种。"""
+        self.conn.execute(
+            "INSERT INTO portfolios (portfolio_id, name, base_ccy, created_at) "
+            "VALUES (?,?,?,?) "
+            "ON CONFLICT(portfolio_id) DO UPDATE SET name=excluded.name, base_ccy=excluded.base_ccy",
+            (portfolio_id, name or portfolio_id, base_ccy,
+             dt.datetime.utcnow().isoformat()),
+        )
+        self.conn.commit()
+
+    def save_positions_snapshot(self, portfolio_id: str, date: str,
+                                rows: list, source: str = "manual") -> int:
+        """写入某组合某日的完整持仓快照（不可变账本：每次变更写新 date）。
+
+        rows 元素为 dict：symbol 必填，quantity/cost_price/weight/note 可选。
+        同 (portfolio_id, date, symbol) 覆盖写。
+        """
+        params = [
+            (
+                portfolio_id, date, r["symbol"],
+                r.get("quantity"), r.get("cost_price"), r.get("weight"),
+                r.get("source", source), r.get("note", ""),
+            )
+            for r in rows
+        ]
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO positions "
+            "(portfolio_id, date, symbol, quantity, cost_price, weight, source, note) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            params,
+        )
+        self.conn.commit()
+        return len(params)
+
+    def latest_positions(self, portfolio_id: str, asof: str | None = None) -> list:
+        """返回组合最近一次快照（date<=asof；asof 为空取最新），dict 列表。"""
+        if asof:
+            row = self.conn.execute(
+                "SELECT MAX(date) FROM positions WHERE portfolio_id=? AND date<=?",
+                (portfolio_id, asof),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT MAX(date) FROM positions WHERE portfolio_id=?",
+                (portfolio_id,),
+            ).fetchone()
+        snap_date = row[0] if row else None
+        if not snap_date:
+            return []
+        rows = self.conn.execute(
+            "SELECT symbol, quantity, cost_price, weight, source, note, date "
+            "FROM positions WHERE portfolio_id=? AND date=? ORDER BY symbol",
+            (portfolio_id, snap_date),
+        ).fetchall()
+        return [
+            {"symbol": r[0], "quantity": r[1], "cost_price": r[2],
+             "weight": r[3], "source": r[4], "note": r[5], "date": r[6]}
+            for r in rows
+        ]
+
+    # ── 风险快照 ──
+
+    def save_risk_snapshot(self, snap: dict) -> None:
+        """保存一天一组合的风险快照（同键覆盖写）。"""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO risk_snapshots "
+            "(portfolio_id, date, vol_ann, var99_1d, te_ann, factor_vol, specific_vol, "
+            "exposures, risk_contrib, stock_contrib, method, computed_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                snap["portfolio_id"], snap["date"],
+                snap.get("vol_ann"), snap.get("var99_1d"), snap.get("te_ann"),
+                snap.get("factor_vol"), snap.get("specific_vol"),
+                json.dumps(snap.get("exposures") or {}, ensure_ascii=False),
+                json.dumps(snap.get("risk_contrib") or {}, ensure_ascii=False),
+                json.dumps(snap.get("stock_contrib") or [], ensure_ascii=False),
+                snap.get("method", "ewma_factor_v1"),
+                dt.datetime.utcnow().isoformat(),
+            ),
+        )
+        self.conn.commit()
+
+    def latest_risk_snapshot(self, portfolio_id: str | None = None) -> dict | None:
+        """返回最新风险快照；portfolio_id 为空时跨组合取最新一条。"""
+        if portfolio_id:
+            row = self.conn.execute(
+                "SELECT portfolio_id, date, vol_ann, var99_1d, te_ann, factor_vol, "
+                "specific_vol, exposures, risk_contrib, stock_contrib, method "
+                "FROM risk_snapshots WHERE portfolio_id=? ORDER BY date DESC LIMIT 1",
+                (portfolio_id,),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT portfolio_id, date, vol_ann, var99_1d, te_ann, factor_vol, "
+                "specific_vol, exposures, risk_contrib, stock_contrib, method "
+                "FROM risk_snapshots ORDER BY date DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "portfolio_id": row[0], "date": row[1], "vol_ann": row[2],
+            "var99_1d": row[3], "te_ann": row[4], "factor_vol": row[5],
+            "specific_vol": row[6],
+            "exposures": json.loads(row[7] or "{}"),
+            "risk_contrib": json.loads(row[8] or "{}"),
+            "stock_contrib": json.loads(row[9] or "[]"),
+            "method": row[10],
+        }

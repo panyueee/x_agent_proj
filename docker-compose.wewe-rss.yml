@@ -33,6 +33,9 @@ services:
       CRON_EXPRESSION: "35 5,17 * * *"
       # 每次抓取间隔，避免过快被限流
       UPDATE_DELAY_TIME: "60s"
+      # fulltext 模式下 limit=500 的 feed 可达数百MB，连续构建会打爆 node 默认堆(~4GB)
+      # 导致 "JavaScript heap out of memory" 崩溃重启，这里放宽到 6GB
+      NODE_OPTIONS: "--max-old-space-size=6144"
     volumes:
       # SQLite 数据文件 + 微信读书 token 持久化，容器重建不丢登录态
       - ./wewe-rss-data:/app/data

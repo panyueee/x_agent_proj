@@ -52,6 +52,40 @@ account_groups:
   - EmberCN             # 链上追踪(中文)
   - WuBlockchain        # 吴说区块链
   - RayDalio            # 无干净文章档案源，X 是其观点主渠道
+  # 2026-07-02 领域补缺 Top25（调研见 docs/survey_x_accounts.md；粉丝数未经API复核）
+  curated_domain_experts:
+  # A股/中国政策
+  - michaelxpettis    # 北大/卡内基，中国经济失衡框架
+  - Brad_Setser       # CFR，中国贸易/资本流动数据拆解
+  - niubi             # Bill Bishop (Sinocism)，中国政策观察基准
+  - HAOHONG_CFA       # 洪灏，A股/港股策略，中英双语高频
+  - YuanTalks         # 中国市场实时快讯
+  - Trinhnomics       # Natixis 亚洲EM，中国出口链/供应链转移
+  # 半导体/AI硬件
+  - dylan522p         # SemiAnalysis，AI芯片/数据中心供应链
+  - Jukanlosreve      # 韩系存储爆料（HBM/DRAM周期）
+  - mingchikuo        # 郭明錤，苹果/AI硬件供应链预测
+  - SKundojjala       # SemiAnalysis，SoC/代工份额
+  # 能源/大宗
+  - JavierBlas        # Bloomberg 能源专栏
+  - staunovo          # UBS 原油，EIA/OPEC 即时解读
+  - WarrenPies        # 3Fourteen，能源×宏观量化
+  - Ole_S_Hansen      # Saxo 大宗商品全景
+  # 美股财报/期权流
+  - unusual_whales    # 期权异动+市场新闻聚合（高频，需过滤）
+  - SpotGamma         # Gamma/dealer positioning
+  - TheTranscript_    # 财报电话会关键引语
+  # 量化/因子
+  - bennpeifert       # QVR，波动率/市场结构
+  - __paleologo       # Balyasny 量化研究主管，因子/风险模型
+  - CliffordAsness    # AQR，因子投资权威
+  # 稳定币/DeFi
+  - nic__carter       # Castle Island，稳定币研究
+  - CampbellJAustin   # ex-Paxos，稳定币设计与监管
+  - 0xngmi            # DefiLlama 创始人，DeFi 数据派
+  # 利率/地缘
+  - lisaabramowicz1   # Bloomberg 利率/信用
+  - robin_j_brooks    # Brookings ex-高盛FX，制裁/美元体系
   serenity_following:
   - aleabitoreddit
   - chrisbarber

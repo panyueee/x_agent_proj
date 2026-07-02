@@ -27,6 +27,7 @@ ingest_text 入库（source_type="wechat"，skip_vectors=True，向量留后统�
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import html
 import json
@@ -53,6 +54,7 @@ sys.path.insert(0, str(ROOT))
 
 FEEDS_FILE = ROOT / "data" / "wechat_feeds.txt"
 DONE_FILE = ROOT / "data" / "wechat_done.json"
+IMG_ROOT = ROOT / "data" / "wechat_images"   # 每篇一个子目录存配图(图表)
 
 
 def _log(m: str) -> None:
@@ -83,6 +85,80 @@ def html_to_text(raw: str) -> str:
     s = "\n".join(ln for ln in lines if ln)
     s = _MULTINL_RE.sub("\n\n", s)
     return s.strip()
+
+
+# ── 文章配图（图表）提取与保存 ──────────────────────────────────────────────
+# 研报文章里的图表(PMI/汇率/GDP走势图)是核心。先把图存下来供 RAG 调出显示 +
+# 将来在 M5 上 OCR 取图内数据。装饰图(页眉/二维码)也会一并存，OCR 时用质检过滤。
+_IMG_SRC_RE = re.compile(r'<img\b[^>]*?\bsrc=["\']([^"\']+)["\']', re.I)
+_MMBIZ_RE = re.compile(r'https?://mmbiz\.qpic\.cn/[^\s"\'<>\\]+')
+
+
+def _img_key(src: str) -> str:
+    """归一化去重键：去查询串 + 去尾部尺寸段（mmbiz 同图 /640 /0 视为一张）。"""
+    s = re.split(r"[?#]", src)[0]
+    return re.sub(r"/\d+$", "", s)
+
+
+def extract_img_srcs(html_body: str) -> list[str]:
+    """提取配图地址：<img src> + 裸 mmbiz URL；按归一化 key 去重保序（跳过 base64）。"""
+    if not html_body:
+        return []
+    srcs = []
+    for m in _IMG_SRC_RE.finditer(html_body):
+        srcs.append(html.unescape(m.group(1)).strip())
+    for m in _MMBIZ_RE.finditer(html_body):
+        srcs.append(m.group(0))
+    seen, out = set(), []
+    for s in srcs:
+        s = re.split(r"\\x|\\u", s)[0].strip()   # 清掉转义尾巴
+        if not s.startswith("http"):             # 跳过 base64/相对路径
+            continue
+        k = _img_key(s)
+        if k not in seen:
+            seen.add(k); out.append(s)
+    return out
+
+
+def _img_ext(src: str) -> str:
+    m = re.search(r"wx_fmt=([a-z]+)", src) or re.search(r"\.([a-z]{3,4})(?:\?|$)", src)
+    return (m.group(1) if m else "jpg").lower()
+
+
+def save_article_images(srcs: list[str], dest_dir: Path,
+                        referer: str = "https://mp.weixin.qq.com/") -> int:
+    """下载/解码文章配图到 dest_dir。mmbiz URL 带 referer 下载，base64 解码。
+    已存在则跳过(断点续传)，<1KB 的图标/占位跳过。返回成功保存数。"""
+    if not srcs:
+        return 0
+    import requests
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    sess = requests.Session(); sess.trust_env = False
+    hdr = {"User-Agent": "Mozilla/5.0", "Referer": referer}
+    saved = 0
+    for i, src in enumerate(srcs):
+        try:
+            if src.startswith("data:image/"):
+                m = re.match(r"data:image/([a-z]+);base64,(.*)", src, re.S)
+                if not m:
+                    continue
+                ext, data = m.group(1), base64.b64decode(m.group(2))
+            else:
+                r = sess.get(src, headers=hdr, timeout=30)
+                if r.status_code != 200 or not r.content:
+                    continue
+                data, ext = r.content, _img_ext(src)
+            if len(data) < 1024:        # 太小多半是图标/占位，跳过
+                continue
+            fp = dest_dir / f"{i:03d}.{ext}"
+            if fp.exists() and fp.stat().st_size > 0:
+                saved += 1
+                continue
+            fp.write_bytes(data)
+            saved += 1
+        except Exception:
+            continue
+    return saved
 
 
 # ── RSS/Atom 解析 ────────────────────────────────────────────────────────────
@@ -155,6 +231,7 @@ def _parse_with_stdlib(xml: str) -> tuple[str, list[dict]]:
             "link": link,
             "published": published,
             "text": html_to_text(raw_body),
+            "html": raw_body,   # 原始HTML，供提取图表图片
         })
 
     return publication, items
@@ -177,6 +254,7 @@ def _parse_with_feedparser(xml: str) -> tuple[str, list[dict]]:
             "link": (e.get("link", "") or "").strip(),
             "published": (e.get("published", "") or e.get("updated", "")).strip(),
             "text": html_to_text(raw_body),
+            "html": raw_body,   # 原始HTML，供提取图表图片
         })
     return publication, items
 
@@ -238,7 +316,8 @@ def _fetch(url: str) -> str:
     return r.text
 
 
-def run(feeds: list[str], limit: int = 0, dry_run: bool = False) -> None:
+def run(feeds: list[str], limit: int = 0, dry_run: bool = False,
+        save_images: bool = False) -> None:
     done = _load_done()
     total_new = 0
     for feed_url in feeds:
@@ -278,6 +357,15 @@ def run(feeds: list[str], limit: int = 0, dry_run: bool = False) -> None:
                 _log(f"  ✗ 质检未过（{reason}）：{it['title'][:30]}")
                 continue
 
+            # 文章配图(图表)：默认只存图片URL列表(mmbiz URL 长期有效)→本地零膨胀。
+            # 将来 M5 按 URL 下载+OCR 取图内数据；RAG 可按 URL 展示。base64 内联图丢弃。
+            img_urls = extract_img_srcs(it.get("html", ""))[:120]
+            img_dir = ""
+            if save_images and img_urls:  # 显式 --download-images 才落地本地(体积大)
+                d = IMG_ROOT / hashlib.md5(sid.encode()).hexdigest()[:16]
+                if save_article_images(img_urls, d):
+                    img_dir = str(d)
+
             n = ingest_text(
                 it["text"],
                 source_id=sid,
@@ -289,12 +377,15 @@ def run(feeds: list[str], limit: int = 0, dry_run: bool = False) -> None:
                     "url": url,
                     "date": it["published"],
                     "source": "wewe-rss",
+                    "image_urls": img_urls,      # 图表URL列表, 待M5下载OCR
+                    "image_count": len(img_urls),
+                    "image_dir": img_dir,        # 仅 --download-images 时非空
                 },
                 skip_vectors=True,  # 无 VOYAGE key，向量留后统一 embed
             )
             done.add(sid)  # 仅入库成功后记 done
             total_new += 1
-            _log(f"  ✓ 入库 {n} 块：{it['title'][:40]}")
+            _log(f"  ✓ 入库 {n} 块 + {len(img_urls)} 图URL：{it['title'][:40]}")
 
         if not dry_run:
             _save_done(done)
@@ -409,6 +500,8 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true", help="只解析打印，不入库")
     ap.add_argument("--status", action="store_true", help="查看断点进度与订阅列表")
     ap.add_argument("--selftest", action="store_true", help="内置样例解析自测（不联网/不入库）")
+    ap.add_argument("--download-images", action="store_true",
+                    help="额外把配图下载到本地(体积大;默认只在元数据存图片URL,下载留M5)")
     args = ap.parse_args()
 
     if args.selftest:
@@ -422,7 +515,7 @@ def main() -> None:
         _log("没有可用 feed。请用 --feeds 指定，或在 data/wechat_feeds.txt 填入 RSS URL。")
         _log("（先按 docs/wewe_rss_setup.md 部署 WeWe RSS + 微信读书登录获取 RSS URL）")
         return
-    run(feeds, limit=args.limit, dry_run=args.dry_run)
+    run(feeds, limit=args.limit, dry_run=args.dry_run, save_images=args.download_images)
 
 
 if __name__ == "__main__":

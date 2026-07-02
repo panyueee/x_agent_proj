@@ -26,6 +26,7 @@ PERSON_SOURCES: dict[str, dict] = {
     "张瑜":   {"wechat_feeds": ["一瑜中的"], "research_authors": ["张瑜"]},
     "李迅雷": {"wechat_feeds": ["李迅雷金融与投资"], "research_authors": ["李迅雷"]},
     "罗志恒": {"wechat_feeds": ["粤开志恒宏观"], "research_authors": ["罗志恒"]},
+    "明明":   {"wechat_feeds": ["明晰笔谈"], "research_authors": ["明明"]},
     "牟一凌": {"wechat_feeds": ["一凌策略研究"], "research_authors": ["牟一凌"]},
     "芦哲":   {"wechat_feeds": [], "research_authors": ["芦哲"]},
 }

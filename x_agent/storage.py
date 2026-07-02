@@ -7,6 +7,7 @@ import datetime as dt
 
 from .fetcher import Tweet
 from .classifier import Signal
+from . import policy_events as _pe
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tweets(
@@ -294,10 +295,18 @@ CREATE TABLE IF NOT EXISTS risk_snapshots(
 );
 """
 
+# 政策事件库表 DDL 由冻结契约模块统一提供（单一真源，避免漂移）
+_SCHEMA += _pe.SCHEMA_SQL
+
 
 class Store:
     def __init__(self, path: str):
         self.conn = sqlite3.connect(path)
+        # tgb 抓取并发写 + WAL：容忍锁等待，避免 "database is locked"
+        try:
+            self.conn.execute("PRAGMA busy_timeout=30000")
+        except Exception:
+            pass
         # 先迁移旧表（加列），再建索引，避免索引引用不存在的列
         for col, default in [("group_tag", "''"), ("source", "'twitter'")]:
             try:
@@ -1128,3 +1137,13 @@ class Store:
             "stock_contrib": json.loads(row[9] or "[]"),
             "method": row[10],
         }
+
+    # ── 政策事件库（方法D 真值尺；写入委托给冻结契约模块）──
+
+    def save_policy_event(self, event, strict: bool = True) -> bool:
+        """写入一条 PolicyEvent（幂等，身份哈希覆盖）。返回 True=新插入。"""
+        return _pe.upsert_event(self.conn, event, strict=strict)
+
+    def query_policy_events(self, **kw) -> list:
+        """查询政策事件（见 policy_events.query_events 参数）。"""
+        return _pe.query_events(self.conn, **kw)

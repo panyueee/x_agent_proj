@@ -98,10 +98,13 @@ NXNY_TARGETS = [
     # 注意：平安/中信建投/民生 的分类页(63/66/14)是空壳（只剩侧栏热榜），
     # 报告本身仍在站内、作者页也正常，故这些人靠 probe_ids 或已知 author_id 解析
     {"name": "钟正生", "broker": "平安证券", "prefix": "平安证券", "stype": 63,
-     "author_id": None, "resolve_kw": ["宏观"],
-     "probe_ids": ["5867275"]},   # 平安-2025重振消费之路(一)-250127（钟正生团队）
+     "author_id": "10842", "resolve_kw": ["宏观"],
+     "probe_ids": ["5867275"]},   # id 经 probe view_5867275 确认（钟正生=10842）
     {"name": "熊园",   "broker": "国盛证券", "prefix": "国盛证券", "stype": 558,
      "author_id": None, "resolve_kw": ["宏观"]},
+    # TODO 未解析(首轮 0 入库)：陈果——建投“一周策略”系列实为秦基栗/邓皓烛团队所写，
+    #   probe_ids 命中的是团队成员非陈果本人，需另找陈果亲笔报告 id；明明——中信债市
+    #   报告在 nxny 多为加密/无作者，probe 命中空作者页。二人暂靠东财/公众号覆盖。
     {"name": "陈果",   "broker": "中信建投", "prefix": "中信建投", "stype": 66,
      "author_id": None, "resolve_kw": ["策略"],
      "probe_ids": ["5445054", "5387187", "5431783"]},  # 建投-一周策略回顾与展望(2023)

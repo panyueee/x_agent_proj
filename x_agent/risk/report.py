@@ -19,6 +19,7 @@ from .decompose import RiskReport, decompose
 from .exposure import estimate_betas
 from .factors import GICS_11, STYLE_FACTORS, build_factor_returns, load_sector_map
 from .portfolio import load_positions
+from .scenarios import SCENARIOS, results_to_frame, run_all
 
 BENCHMARK = "000300_SS"          # 2021-03 起；更早区间批次二再处理
 BETA_LOOKBACK_DAYS = 800         # 加载持仓行情的自然日回看（250 交易日窗口 + 余量）
@@ -178,6 +179,131 @@ def _render_markdown(report: RiskReport, positions: pd.DataFrame, date: str,
         "",
     ]
     return "\n".join(lines)
+
+
+def _prepare_betas(store, portfolio_id: str, date: str | None,
+                   data_dir: str | Path, cache_dir: str | Path, db_path: str):
+    """加载持仓 + 全历史因子收益 + 当前窗口 beta（复用批次一 exposure）。
+
+    返回 (positions, betas, factor_returns, names)。情景重放的公共前置。
+    """
+    positions = load_positions(store, portfolio_id, asof=date, data_dir=data_dir)
+    fr = build_factor_returns("a", data_dir=data_dir, cache_dir=cache_dir, db_path=db_path)
+    beta_end = (date or fr.index[-1].strftime("%Y-%m-%d"))
+    stock_ret = _load_holding_returns(positions, beta_end, data_dir)
+    sector_map = load_sector_map(db_path)
+    betas, _ = estimate_betas(stock_ret, fr.loc[:pd.to_datetime(beta_end)],
+                              sector_map=sector_map)
+    names: dict[str, str] = {}
+    for sym in positions["symbol"]:
+        sec = store.get_security(sym)
+        if sec and sec.get("name"):
+            names[sym] = sec["name"]
+    return positions, betas, fr, names
+
+
+def _fmt_signed_pct(x, digits: int = 1) -> str:
+    return "—" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{x * 100:+.{digits}f}%"
+
+
+def _render_scenarios_markdown(results, positions, portfolio_id: str,
+                               names: dict[str, str]) -> str:
+    summary = results_to_frame(results)
+    lines = [
+        f"# 历史危机场景重放 — {portfolio_id}",
+        "",
+        "> 个人版压力测试（批次二 / 提案 2）：把当前组合整体放进历史危机窗口，"
+        "权重固定不再平衡，逐日复利。",
+        "> 方法与局限见 `x_agent/risk/scenarios.py` 头注 / docs/aladdin/05 §4。"
+        f" 演示组合：{portfolio_id}（{len(positions)} 只跨市场持仓，单个 demo，示意性质）。",
+        "",
+        "## 情景对照总表",
+        "",
+        "| 情景 | 窗口 | 交易日 | 组合总损益 | 最大回撤 | 最惨单日 | 基准 | 真实重放覆盖 |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for name, r in summary.iterrows():
+        lines.append(
+            f"| **{name}** {r['desc']} | {r['start']}~{r['end']} | {int(r['n_days'])} "
+            f"| **{_fmt_signed_pct(r['total_return'])}** | {_fmt_signed_pct(r['max_drawdown'])} "
+            f"| {_fmt_signed_pct(r['max_daily_loss'])}（{r['worst_day']}） "
+            f"| {_fmt_signed_pct(r['benchmark'])} | {r['coverage'] * 100:.0f}% |")
+
+    if len(summary):
+        worst = summary["total_return"].idxmin()
+        wr = summary.loc[worst]
+        lines += [
+            "",
+            f"**最伤情景：{worst}** —— {wr['desc']}，组合总损益 "
+            f"{_fmt_signed_pct(wr['total_return'])}，最大回撤 {_fmt_signed_pct(wr['max_drawdown'])}。",
+            "",
+        ]
+
+    lines += ["## 各情景明细", ""]
+    for r in results:
+        lines += [
+            f"### {r.name} — {r.desc}",
+            "",
+            f"窗口 {r.start} ~ {r.end}（{r.n_days} 交易日）；组合总损益 "
+            f"**{_fmt_signed_pct(r.total_return)}**，最大回撤 {_fmt_signed_pct(r.max_drawdown)}，"
+            f"最惨单日 {_fmt_signed_pct(r.max_daily_loss)}（{r.max_daily_loss_date}）；"
+            f"基准 {_fmt_signed_pct(r.benchmark_return)}；真实重放覆盖 {r.coverage * 100:.0f}%。",
+            "",
+            "逐持仓损益贡献（`*`=synthetic β 合成，无真实历史，保守低估）：",
+            "",
+            "| 标的 | 名称 | 模式 | 权重 | 情景收益 | 对组合贡献 |",
+            "| --- | --- | --- | ---: | ---: | ---: |",
+        ]
+        for sym, row in r.per_position.iterrows():
+            star = "*" if row["mode"] == "synthetic" else ""
+            lines.append(
+                f"| {sym}{star} | {names.get(sym, '')} | {row['mode']} "
+                f"| {row['weight'] * 100:.0f}% | {_fmt_signed_pct(row['ret'])} "
+                f"| {_fmt_signed_pct(row['contrib'])} |")
+        losers = r.factor_attr[r.factor_attr < 0].head(3)
+        if len(losers):
+            attr = "、".join(f"{f}（{_fmt_signed_pct(v)}）" for f, v in losers.items())
+            lines += ["", f"系统性因子主因（线性近似，仅参考）：{attr}。", ""]
+        else:
+            lines.append("")
+
+    lines += [
+        "## 口径与局限",
+        "",
+        "- 权重固定不再平衡（Aladdin 即时压力测试同款简化）；起始日为基准日（NAV=1）。",
+        "- replay 腿：真实收盘价按 A 股窗口日历 ffill 后 pct_change，跨市场休市日涨跌并入下一 A 交易日。",
+        "- synthetic 腿（`*`）：ret=β·因子收益，忽略特质波动 → 系统性低估极端损失；coverage 为真实重放权重占比。",
+        "- 窗口中途上市的标的上市前记平收益（如 sz.300750 在 2018 窗口中段 IPO）。",
+        "- 因子归因为纯系统性线性近似，不与组合总损益对账；逐持仓贡献才是主口径。",
+        f"- 单个 demo 组合（{portfolio_id}），示意性质；β 用当前窗口估计（"
+        "'当前组合遭遇历史危机'的假设，非历史时点持仓）。",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def render_scenario_report(store, portfolio_id: str = "demo", date: str | None = None,
+                           scenario: str = "all",
+                           data_dir: str | Path = "data",
+                           cache_dir: str | Path = "output/factors",
+                           db_path: str = "output/x_agent.db",
+                           out_dir: str | Path = "output/risk") -> Path:
+    """端到端历史危机重放：持仓 → beta → 全情景 → markdown（output/risk/scenarios_<pf>.md）。"""
+    positions, betas, fr, names = _prepare_betas(
+        store, portfolio_id, date, data_dir, cache_dir, db_path)
+    scen_list = None if scenario == "all" else [scenario]
+    if scen_list and scenario not in SCENARIOS:
+        raise KeyError(f"未知情景 {scenario!r}，可选 all / {list(SCENARIOS)}")
+    results = run_all(store, portfolio_id, betas, fr, positions,
+                      data_dir=data_dir, scenarios=scen_list)
+    if not results:
+        raise ValueError("没有可跑的情景（都因数据不足被跳过）")
+    md = _render_scenarios_markdown(results, positions, portfolio_id, names)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"scenarios_{portfolio_id}.md"
+    out_path.write_text(md, encoding="utf-8")
+    return out_path
 
 
 def render_risk_report(store, portfolio_id: str = "demo", date: str | None = None,

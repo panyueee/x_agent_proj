@@ -64,9 +64,18 @@ class ClaudeLLM:
     """真实 Claude 客户端。需要环境变量 ANTHROPIC_API_KEY。"""
 
     def __init__(self, model: str = DEFAULT_MODEL, max_retries: int = 3):
-        import anthropic  # 延迟导入，mock 测试不需要装好 key
-        self._anthropic = anthropic
-        self.client = anthropic.Anthropic()
+        # 有 key 走 anthropic SDK，否则退化为 claude -p（订阅、无需 key）
+        from x_agent.llm_client import build_client
+        try:
+            import anthropic  # 延迟导入，mock 测试/无 key 时不强依赖
+            self._anthropic = anthropic
+            self._retry_errs = (anthropic.RateLimitError,
+                                anthropic.InternalServerError,
+                                anthropic.APIConnectionError)
+        except Exception:
+            self._anthropic = None
+            self._retry_errs = (RuntimeError,)   # CLI 路径的失败也重试
+        self.client = build_client()
         self.model = model
         self.max_retries = max_retries
         self.input_tokens = 0
@@ -87,8 +96,7 @@ class ClaudeLLM:
                 self.input_tokens += resp.usage.input_tokens
                 self.output_tokens += resp.usage.output_tokens
                 return "".join(b.text for b in resp.content if b.type == "text")
-            except (self._anthropic.RateLimitError, self._anthropic.InternalServerError,
-                    self._anthropic.APIConnectionError) as e:
+            except self._retry_errs as e:
                 last_err = e
                 wait = 5 * (attempt + 1)
                 logger.warning("LLM 调用失败(%s)，%ss 后重试: %s", type(e).__name__, wait, e)

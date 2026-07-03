@@ -979,8 +979,9 @@ def main():
 
     llm = None
     if cfg["classify"].get("use_llm"):
-        import anthropic
-        llm = anthropic.Anthropic()
+        from x_agent.llm_client import build_client, backend_name
+        llm = build_client(cfg)          # 有 key 走 SDK，否则 claude -p
+        print(f"[llm] 后端：{backend_name()}")
 
     interval = cfg["fetch"].get("poll_interval_minutes", 0)
     while True:

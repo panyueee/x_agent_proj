@@ -417,15 +417,17 @@ _anthropic_lock = threading.Lock()
 
 
 def _get_anthropic_client():
-    """惰性构建并缓存 anthropic.Anthropic() 单例；未配置 key 时返回 None。"""
+    """惰性构建并缓存 LLM 客户端：有 ANTHROPIC_API_KEY 走 SDK，否则 claude -p（订阅）。
+    连 claude CLI 也不可用时返回 None。"""
     global _anthropic_client
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return None
     if _anthropic_client is None:
         with _anthropic_lock:
             if _anthropic_client is None:
-                import anthropic
-                _anthropic_client = anthropic.Anthropic()
+                try:
+                    from x_agent.llm_client import build_client
+                    _anthropic_client = build_client()
+                except Exception:
+                    return None
     return _anthropic_client
 
 
@@ -883,7 +885,7 @@ def rag_ask(payload: RagAskPayload):
     try:
         client = _get_anthropic_client()
         if client is None:
-            return {"answer": "未配置 ANTHROPIC_API_KEY，无法生成回答", "sources": [], "chart": chart}
+            return {"answer": "LLM 不可用：既无 ANTHROPIC_API_KEY，claude CLI 也未就绪", "sources": [], "chart": chart}
         from x_agent.rag import ask as _rag_ask
         kwargs = {"source_type": payload.source_type}
         if payload.top_k and payload.top_k > 0:

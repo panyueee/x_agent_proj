@@ -299,10 +299,14 @@ def render_scenario_report(store, portfolio_id: str = "demo", date: str | None =
     if not results:
         raise ValueError("没有可跑的情景（都因数据不足被跳过）")
     md = _render_scenarios_markdown(results, positions, portfolio_id, names)
+    from x_agent.report_qa import provenance_footer, qa_and_warn
+    md += provenance_footer("本项目风险引擎 x_agent.risk（因子路径 factor_returns_a.parquet）",
+                            disclaimer=False)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"scenarios_{portfolio_id}.md"
     out_path.write_text(md, encoding="utf-8")
+    qa_and_warn(md, "scenario", portfolio_id)
     return out_path
 
 
@@ -328,6 +332,8 @@ def render_risk_report(store, portfolio_id: str = "demo", date: str | None = Non
             names[sym] = sec["name"]
 
     md = _render_markdown(report, positions, date, portfolio_id, per_position, names)
+    from x_agent.report_qa import provenance_footer, qa_and_warn
+    md += provenance_footer(f"本项目风险引擎 x_agent.risk（快照 {date}）", disclaimer=False)
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -335,6 +341,7 @@ def render_risk_report(store, portfolio_id: str = "demo", date: str | None = Non
     out_path.write_text(md, encoding="utf-8")
     # 固定路径的"最新报告"副本
     Path(out_dir).parent.joinpath("risk_report.md").write_text(md, encoding="utf-8")
+    qa_and_warn(md, "risk", portfolio_id)
 
     top10 = report.stock_ccr.sort_values(ascending=False).head(10)
     store.save_risk_snapshot({

@@ -126,3 +126,27 @@ def _check_provenance(text: str) -> list[str]:
 
 def is_clean(text: str, kind: str = "generic") -> bool:
     return not validate_report(text, kind)
+
+
+# ── 生成流程接入辅助 ──────────────────────────────────────────────────────────
+
+def provenance_footer(sources: str, disclaimer: bool = True) -> str:
+    """标准溯源页脚：生成时间 + 数据来源 + 可选免责。生成报告统一 append 它，
+    既满足 QA 的 freshness/来源/免责检查，也让人看清口径。"""
+    import datetime as _dt
+    ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    foot = f"\n\n---\n_生成时间：{ts}｜数据来源：{sources}_"
+    if disclaimer:
+        foot += "\n_本报告仅作事实归纳，不构成投资建议，风险自担。_"
+    return foot
+
+
+def qa_and_warn(text: str, kind: str, label: str = "") -> list[str]:
+    """校验并把问题打到 stdout（非硬拦），返回问题列表。供生成器收尾调用。"""
+    issues = validate_report(text, kind)
+    if issues:
+        tag = f"[QA:{kind}{' '+label if label else ''}]"
+        print(f"{tag} {len(issues)} 个输出规范问题：")
+        for i in issues:
+            print(f"  - {i}")
+    return issues

@@ -454,7 +454,10 @@ def build_digest(store, path: str, annotate_books: bool | None = None) -> str:
     # ── RAG 知识库状态 ──
     lines += _rag_section()
 
-    out = "\n".join(lines)
+    # ── 溯源页脚 + 输出 QA 门禁 ──
+    from x_agent.report_qa import provenance_footer, qa_and_warn
+    out = "\n".join(lines) + provenance_footer("见各板块（X/淘股吧/东财/RAG 等）")
     with open(path, "w", encoding="utf-8") as f:
         f.write(out)
+    qa_and_warn(out, "digest")   # 非硬拦，仅打印规范问题
     return out

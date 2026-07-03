@@ -261,6 +261,73 @@ class TestHayesIterator:
         assert it["get_text"]() == "alpha beta"
 
 
+class TestToozeSubstack:
+    """Adam Tooze / Chartbook 复用 iter_substack：付费跳过 + 空批停 + 断点续传汇总。"""
+
+    def test_paid_skipped_and_collected(self, monkeypatch):
+        # 一批含免费+付费，付费只收 slug 不产出；只在空批停（短批不终止翻页）
+        archive = {
+            0: [{"slug": "cb-1", "title": "Chartbook 1", "audience": "everyone",
+                 "post_date": "2026-07-01T10:00:00Z",
+                 "canonical_url": "https://adamtooze.substack.com/p/cb-1"},
+                {"slug": "top-links-9", "title": "Top Links 9", "audience": "only_paid",
+                 "post_date": "2026-06-30T10:00:00Z", "canonical_url": "u"}],
+            2: [{"slug": "cb-2", "title": "Chartbook 2", "audience": "everyone",
+                 "post_date": "2026-06-01T10:00:00Z",
+                 "canonical_url": "https://adamtooze.substack.com/p/cb-2"}],
+            3: [],
+        }
+
+        def fake_json(url, timeout=60):
+            import re as _re
+            if "/api/v1/archive" in url:
+                off = int(_re.search(r"offset=(\d+)", url).group(1))
+                return archive.get(off, [])
+            m = _re.search(r"/api/v1/posts/(\S+)$", url)
+            return {"body_html": f"<p>body of {m.group(1)}</p>"}
+
+        monkeypatch.setattr(gg, "http_json", fake_json)
+        paid: list = []
+        items = list(gg.iter_substack("https://adamtooze.substack.com",
+                                      "adamtooze.substack.com", page_size=2, paid_out=paid))
+        # 免费两篇都拿到（第二篇在 offset=2 的短批里，不能被短批提前终止漏掉）
+        assert [it["url"] for it in items] == [
+            "https://adamtooze.substack.com/p/cb-1",
+            "https://adamtooze.substack.com/p/cb-2",
+        ]
+        assert items[0]["site"] == "adamtooze.substack.com"
+        assert items[0]["date"] == "2026-07-01"
+        assert items[0]["get_text"]() == "body of cb-1"
+        # 付费文被跳过并记入 paid_out（供 run_tooze 汇总「跳过付费数」）
+        assert paid == ["top-links-9"]
+
+    def test_run_tooze_reports_skipped_paid(self, monkeypatch, tmp_done, fake_rag):
+        archive = {
+            0: [{"slug": "cb-1", "title": "Chartbook 1", "audience": "everyone",
+                 "post_date": "2026-07-01T10:00:00Z",
+                 "canonical_url": "https://adamtooze.substack.com/p/cb-1"},
+                {"slug": "tl-1", "title": "Top Links 1", "audience": "only_paid",
+                 "post_date": "2026-06-30T10:00:00Z", "canonical_url": "u"},
+                {"slug": "tl-2", "title": "Top Links 2", "audience": "only_paid",
+                 "post_date": "2026-06-29T10:00:00Z", "canonical_url": "u2"}],
+            3: [],
+        }
+
+        def fake_json(url, timeout=60):
+            import re as _re
+            if "/api/v1/archive" in url:
+                off = int(_re.search(r"offset=(\d+)", url).group(1))
+                return archive.get(off, [])
+            return {"body_html": "<p>" + ("free chartbook prose. " * 20) + "</p>"}
+
+        monkeypatch.setattr(gg, "http_json", fake_json)
+        res = gg.run_tooze(set(), limit=0, dry_run=False)
+        assert res["new"] == 1                 # 只入 1 篇免费
+        assert res["skipped_paid"] == 2        # 两篇付费被跳过并汇总
+        assert fake_rag[0]["author"] == "adam_tooze"
+        assert fake_rag[0]["source_type"] == "guru"
+
+
 # ── 代理显式表 ────────────────────────────────────────────────────────────────
 class TestProxyTable:
     def test_domain_modes(self):

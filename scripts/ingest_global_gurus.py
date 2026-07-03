@@ -7,6 +7,8 @@
   buffett   Buffett 股东信 — 1977–2003 HTML + 2004+ PDF（Sucuri 强制 brotli，requests+Brotli 已装）
   hayes     Arthur Hayes — Substack /api/v1/archive 分页 + /api/v1/posts/<slug> 全文
             （BitMEX 2015–2020 旧文已迁 Next.js 客户端渲染，feed 仅 20 条且与 Substack 重复，见 TODO）
+  tooze     Adam Tooze / Chartbook — 同 Substack 结构；只抓 audience=="everyone" 的免费文，
+            付费(only_paid)正文 API 仅回 ~200 字预览，一律跳过、不入库、不破付费墙
   damodaran Aswath Damodaran — Blogger alt=rss feed 分页回填 2008–今（全文在 <description>）
   alden     Lyn Alden — wp-json/wp/v2/posts 全文（必须直连，代理会掐 TLS）
   hussman   John Hussman — wp-json/wp/v2/posts 全文（2017-10 至今；更早 wmc 档案见 TODO）
@@ -387,32 +389,58 @@ def run_buffett(done: set[str], limit: int = 0, dry_run: bool = False) -> dict:
     return process_articles("buffett", "warren_buffett", gen(), done, limit, dry_run)
 
 
-# ── 3. Arthur Hayes：Substack archive API 分页 + 逐篇取全文 ───────────────────
+# ── 3. Substack 通用：archive API 分页 + 逐篇取全文（Hayes / Tooze 共用）───────
 HAYES_BASE = "https://cryptohayes.substack.com"
+TOOZE_BASE = "https://adamtooze.substack.com"
 
 
-def iter_hayes(page_size: int = 20) -> Iterator[dict]:
+def http_json_retry(url: str, tries: int = 4, backoff: float = 3.0):
+    """http_json 加瞬时错误重试（Substack 经代理偶发 ReadTimeout，别让整源翻页崩掉）。"""
+    for i in range(tries):
+        try:
+            return http_json(url)
+        except Exception as e:
+            if i == tries - 1:
+                raise
+            _log(f"    ↻ 重试 {i + 1}/{tries - 1}（{type(e).__name__}）：{url[-60:]}")
+            time.sleep(backoff * (i + 1))
+
+
+def iter_substack(base: str, site: str, page_size: int = 20,
+                  paid_out: Optional[list] = None) -> Iterator[dict]:
+    """
+    Substack /api/v1/archive?sort=new&offset= 分页，逐篇 /api/v1/posts/<slug> 取全文。
+    只产出免费文（audience in {None,"everyone"}）；付费文(only_paid 等)正文 API 仅回
+    ~200 字预览，直接跳过、绝不入库/破付费墙。付费被跳的 slug 收集进 paid_out（若给）。
+    注意：Substack 对 limit 有服务端上限（要 50 常只回 ~23），故只在「空批」停，
+    不能用 len(batch)<page_size 判尾页——否则某页偶发短批会漏掉后面所有历史免费文。
+    翻页与取正文都走 http_json_retry：瞬时 ReadTimeout 不该整源中止。
+    """
     offset = 0
     while True:
-        batch = http_json(f"{HAYES_BASE}/api/v1/archive?sort=new&offset={offset}&limit={page_size}")
+        batch = http_json_retry(f"{base}/api/v1/archive?sort=new&offset={offset}&limit={page_size}")
         if not batch:
             break
         for it in batch:
             if it.get("audience") not in (None, "everyone"):
-                continue  # 理论上他全免费，防御一下
+                if paid_out is not None:
+                    paid_out.append(it.get("slug", ""))
+                continue
             slug = it.get("slug", "")
-            url = it.get("canonical_url") or f"{HAYES_BASE}/p/{slug}"
+            url = it.get("canonical_url") or f"{base}/p/{slug}"
             yield {
                 "title": (it.get("title") or slug).strip(),
                 "url": url,
                 "date": (it.get("post_date") or "")[:10],
-                "site": "cryptohayes.substack.com",
+                "site": site,
                 "get_text": (lambda s=slug: html_to_text(
-                    http_json(f"{HAYES_BASE}/api/v1/posts/{s}").get("body_html") or "")),
+                    http_json_retry(f"{base}/api/v1/posts/{s}").get("body_html") or "")),
             }
         offset += len(batch)
-        if len(batch) < page_size:
-            break
+
+
+def iter_hayes(page_size: int = 20) -> Iterator[dict]:
+    return iter_substack(HAYES_BASE, "cryptohayes.substack.com", page_size)
 
 
 def run_hayes(done: set[str], limit: int = 0, dry_run: bool = False) -> dict:
@@ -420,6 +448,17 @@ def run_hayes(done: set[str], limit: int = 0, dry_run: bool = False) -> dict:
     # Next.js/Contentful 且列表/正文均客户端渲染，category feed 仅 20 条且全部与
     # Substack 重复（实测 2026-07）。需要真实浏览器或逆向其内部 API 才能回填。
     return process_articles("hayes", "arthur_hayes", iter_hayes(), done, limit, dry_run)
+
+
+def run_tooze(done: set[str], limit: int = 0, dry_run: bool = False) -> dict:
+    """Adam Tooze / Chartbook。免费文 ~507 篇(2020-11 至今)，付费 Top Links 全部跳过。"""
+    paid: list = []
+    res = process_articles("tooze", "adam_tooze",
+                           iter_substack(TOOZE_BASE, "adamtooze.substack.com", paid_out=paid),
+                           done, limit, dry_run)
+    res["skipped_paid"] = len(paid)
+    _log(f"[tooze] 跳过付费(only_paid) {len(paid)} 篇（只抓 audience=everyone 的免费文）")
+    return res
 
 
 # ── 4. Damodaran：Blogger alt=rss feed 分页（全文在 description）──────────────
@@ -518,6 +557,7 @@ SOURCES: dict[str, Callable] = {
     "marks": run_marks,
     "buffett": run_buffett,
     "hayes": run_hayes,
+    "tooze": run_tooze,
     "damodaran": run_damodaran,
     "alden": run_alden,
     "hussman": run_hussman,
@@ -602,8 +642,9 @@ def main() -> None:
 
     print("\n===== 本次汇总 =====")
     for name, s in summary.items():
+        paid = f"，付费跳过 {s['skipped_paid']}" if s.get("skipped_paid") else ""
         print(f"{name:10s} 新增 {s['new']:4d} 篇，质检拦截 {s['skipped_quality']}，"
-              f"失败 {len(s['failed'])}")
+              f"失败 {len(s['failed'])}{paid}")
         for url, err in s["failed"][:10]:
             print(f"    ✗ {url} — {err}")
     if not args.dry_run:

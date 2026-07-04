@@ -26,7 +26,8 @@ EXCLUDES=(
 # whisper 模型 1.5G:默认带(ASR 免下载),NO_MODELS=1 则不带
 [ "${NO_MODELS:-0}" = "1" ] && EXCLUDES+=(--exclude='models')
 
-FLAGS=(-a --partial --info=progress2)
+# macOS 自带 rsync 2.6.9 不认 --info=progress2(那是 rsync 3.x),用 -P(=--partial --progress)
+FLAGS=(-a -P)
 # 局域网不加 -z(rag.db/mp3/pdf 压不动,压缩反拖 CPU)
 [ "${DRY:-0}" = "1" ] && FLAGS+=(--dry-run)
 
